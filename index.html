@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>UTZLINE Dropbox Test</title>
+<meta name="theme-color" content="#14131c">
+<link rel="manifest" href="manifest.json?v=v2">
+<link rel="icon" href="icons/icon-192.png?v=v2">
+<!--
+  UTZLINE Dropbox Test (2026-11-18) -- a standalone trial app, NOT one of the 18 apps and not in their build / installers.
+  Andrew: "Build a standalone test app that proves Dropbox can replace SharePoint as the UTZLINE cloud store, with local-first saving.
+  It must not touch the 18 existing apps or any SharePoint/Graph code."
+  - Sign-in: OAuth2 code + PKCE, token_access_type=offline, refresh token kept on this device, silent refresh. No secret anywhere
+    (the app key below is public). A shell (Electron / Android) can take over the browser step through window.utzDropboxAuth.authorize.
+  - The shared UTZLINE folder is reached with the Dropbox-API-Path-Root header (the shared folder's namespace id), so paths are the same
+    for the owner and invited members. The folder is chosen once and remembered.
+  - Local-first: every save goes into this device's storage (IndexedDB) first; a background uploader sends it (one write at a time --
+    Dropbox locks a shared folder per write), with retry / backoff and Retry-After. A queued save is only removed once Dropbox confirms it
+    AND its content_hash matches what this device sent. "Someone else saved first" (rev changed) is shown as a conflict, never overwritten.
+  - Every error shows the plain summary, HTTP status, X-Dropbox-Request-Id and the full body Dropbox sent.
+  - Self-test: write / read back, overwrite by rev, forced conflict, ~20 MB chunked upload, listing, change cursor (+ longpoll), a
+    local-first save going up, and the "Speed with Dropbox" table.
+  Tests: tests/pdftest-dropbox (a stand-in Dropbox server). DROPBOX-AUDIT.md maps every SharePoint call to Dropbox.
+-->
+<style>
+:root{ --bg:#f4f3f1; --card:#fff; --ink:#1d1c22; --muted:#666; --line:#e2e0dc; --accent:#e2572b; --accent-ink:#fff; --ok:#2f7d32; --warn:#9a5b00; --bad:#c92a2a; --chip:#f0eeea; }
+@media (prefers-color-scheme: dark){ :root{ --bg:#14131c; --card:#1e1d28; --ink:#ecebf1; --muted:#a7a5b3; --line:#34323f; --chip:#2a2936; --ok:#6cc070; --warn:#e0a030; --bad:#ff7a7a; } }
+*{ box-sizing:border-box; }
+body{ margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif; font-variant-numeric:tabular-nums; }
+header{ position:sticky; top:0; z-index:5; background:#14131c; color:#fff; padding:10px 16px; display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; }
+header h1{ font-size:17px; margin:0; font-weight:700; }
+header h1 b{ color:var(--accent); }
+header .tag{ font-size:11px; border:1px solid #666; border-radius:4px; padding:1px 5px; color:#ccc; }
+.net{ font-size:13px; padding:3px 10px; border-radius:999px; background:#2f7d32; }
+.net.off{ background:#9a5b00; }
+header .who{ font-size:13px; color:#ccc; margin-left:auto; }
+main{ max-width:1100px; margin:0 auto; padding:14px 16px 60px; display:grid; gap:14px; }
+section{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; min-width:0; }
+section h2{ margin:0 0 8px; font-size:16px; }
+.row{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+button{ font:inherit; border-radius:8px; border:1px solid var(--line); background:var(--chip); color:var(--ink); padding:7px 13px; cursor:pointer; }
+button.go{ background:var(--accent); border-color:var(--accent); color:var(--accent-ink); font-weight:600; }
+button:disabled{ opacity:.5; cursor:default; }
+input[type=text], textarea{ font:inherit; width:100%; border:1px solid var(--line); border-radius:8px; padding:8px 10px; background:var(--bg); color:var(--ink); }
+textarea{ min-height:140px; resize:vertical; }
+.muted{ color:var(--muted); font-size:13px; }
+.mono-safe{ white-space:pre-wrap; word-break:break-all; font-size:12px; line-height:1.4; background:var(--chip); border-radius:6px; padding:6px 8px; margin-top:4px; }
+.err{ border-left:4px solid var(--bad); padding:6px 10px; margin:6px 0; background:var(--chip); border-radius:6px; }
+.err b{ color:var(--bad); }
+.list{ border-top:1px solid var(--line); margin-top:8px; }
+.item{ display:flex; flex-wrap:wrap; gap:6px 12px; align-items:center; padding:7px 2px; border-bottom:1px solid var(--line); }
+.item .nm{ flex:1 1 220px; min-width:0; overflow-wrap:anywhere; }
+.chip{ font-size:12px; border-radius:999px; padding:2px 9px; background:var(--chip); }
+.chip.ok{ color:var(--ok); } .chip.warn{ color:var(--warn); } .chip.bad{ color:var(--bad); }
+.drop{ border:2px dashed var(--line); border-radius:10px; padding:18px; text-align:center; color:var(--muted); margin-top:8px; user-select:none; -webkit-user-select:none; }
+.drop.over{ border-color:var(--accent); color:var(--ink); }
+table{ border-collapse:collapse; width:100%; font-size:13px; }
+td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+.pass{ color:var(--ok); font-weight:700; } .fail{ color:var(--bad); font-weight:700; }
+.crumbs a{ color:var(--accent); cursor:pointer; text-decoration:none; }
+.hidden{ display:none !important; }
+.status{ font-size:14px; margin:4px 0 8px; }
+.speed .t{ color:var(--muted); min-width:64px; display:inline-block; }
+.speed .s{ float:right; }
+.slow{ color:var(--warn); font-weight:600; } .fast{ color:var(--ok); font-weight:600; }
+@media (max-width:640px){ header .who{ margin-left:0; width:100%; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>UTZLINE <b>Dropbox</b> Test</h1><span class="tag">RC 1.0 · v2</span>
+  <span class="net" id="net">Online</span>
+  <span class="who" id="who">Not signed in</span>
+</header>
+<main>
+  <section id="secSignIn">
+    <h2>1 · Sign in to Dropbox</h2>
+    <div class="row"><button class="go" id="btnSignIn" type="button">Sign in with Dropbox</button><button id="btnSignOut" type="button" class="hidden">Sign out</button></div>
+    <p class="muted">Each person signs in with their own Dropbox account (invited to the shared UTZLINE folder). Nothing else needs installing.</p>
+    <p class="muted">This page sends Dropbox back to <b id="redir"></b> — that exact address must be listed under <b>Redirect URIs</b> in the Dropbox App Console.</p>
+    <div id="signInErr"></div>
+  </section>
+
+  <section id="secFolder" class="hidden">
+    <h2>2 · The shared UTZLINE folder</h2>
+    <div class="status" id="folderNow"></div>
+    <div class="row"><button id="btnFindFolders" type="button">Choose the folder…</button></div>
+    <div id="folderList" class="list hidden"></div>
+    <div id="folderErr"></div>
+  </section>
+
+  <section id="secQueue">
+    <h2>Saves on this device</h2>
+    <div class="status" id="queueSummary">Nothing waiting.</div>
+    <div class="row"><button id="btnSendNow" type="button">Send now</button></div>
+    <div id="queueList" class="list"></div>
+    <details><summary class="muted">Uploaded recently</summary><div id="historyList" class="list"></div></details>
+  </section>
+
+  <section id="secFiles" class="hidden">
+    <h2>3 · Files</h2>
+    <div class="crumbs" id="crumbs"></div>
+    <div class="row" style="margin-top:6px"><button id="btnRefresh" type="button">Refresh</button><span class="muted" id="watchNote"></span></div>
+    <div id="filesErr"></div>
+    <div id="fileList" class="list"></div>
+    <div class="drop" id="drop">Drop files here to save them into this folder (kept on this device first, then sent to Dropbox).</div>
+  </section>
+
+  <section id="secEdit" class="hidden">
+    <h2>4 · A note (local-first save)</h2>
+    <label class="muted" for="edPath">File (from the UTZLINE folder)</label>
+    <input type="text" id="edPath" value="/Dropbox test/note.txt" autocomplete="off">
+    <textarea id="edText" placeholder="Type here, then Save"></textarea>
+    <div class="row" style="margin-top:8px"><button class="go" id="btnSave" type="button">Save</button><button id="btnSaveDevice" type="button">Save to this device</button><span class="muted" id="edStatus"></span></div>
+  </section>
+
+  <section id="secTest" class="hidden">
+    <h2>5 · Self-test</h2>
+    <p class="muted">Writes into <b>/_utzline-selftest</b> in the UTZLINE folder (the same few files are reused each run; nothing is deleted).</p>
+    <div class="row"><button class="go" id="btnTest" type="button">Run self-test</button><span class="muted" id="testNote"></span></div>
+    <div id="testOut"></div>
+  </section>
+
+  <section id="secSpeed">
+    <div id="speed" class="speed"></div>
+  </section>
+</main>
+<script>
+(function(){
+  "use strict";
+  var APP_VERSION = "v2";
+  // ---------------------------------------------------------------------------------------------------------------------------------
+  // settings (window.DropboxTestConfig: the tests point these at a stand-in Dropbox; never set in real use)
+  var DEF = {
+    appKey: "fshim7tsxbhw4d7", // the Dropbox app key -- public (PKCE sign-in, no secret)
+    authUrl: "https://www.dropbox.com/oauth2/authorize",
+    tokenUrl: "https://api.dropboxapi.com/oauth2/token",
+    api: "https://api.dropboxapi.com/2",
+    content: "https://content.dropboxapi.com/2",
+    notify: "https://notify.dropboxapi.com/2",
+    chunk: 8 * 1024 * 1024,          // upload-session part size (Dropbox wants multiples of 4 MiB)
+    simpleMax: 150 * 1024 * 1024,    // one-call upload up to this size
+    pageLimit: 2000,                 // entries per list_folder page
+    longpollTimeout: 30,             // seconds
+    pollMs: 30000,                   // change check when longpoll isn't available
+    bigTestBytes: 20 * 1024 * 1024,  // the self-test's chunked file
+    redirectUri: ""
+  };
+  var CFG = (function(){ var o = {}, k, src = window.DropboxTestConfig || {}; for (k in DEF) o[k] = DEF[k]; for (k in src) if (src.hasOwnProperty(k)) o[k] = src[k]; return o; })();
+  var BACKOFF = [2000, 5000, 15000, 60000, 300000, 900000];
+  var SELFTEST_DIR = "/_utzline-selftest";
+
+  function $(id){ return document.getElementById(id); }
+  function esc(s){ return String(s == null ? "" : s).replace(/[&<>"']/g, function(c){ return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+  function now(){ return Date.now(); }
+  function wait(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+  function qs(o){ var a = [], k; for (k in o) if (o.hasOwnProperty(k) && o[k] != null) a.push(encodeURIComponent(k) + "=" + encodeURIComponent(o[k])); return a.join("&"); }
+  function base(p){ var s = String(p || "").split("/"); return s[s.length - 1] || "/"; }
+  function dirOf(p){ var s = String(p || ""); var i = s.lastIndexOf("/"); return i <= 0 ? "" : s.slice(0, i); }
+  function normRel(p){ p = String(p || "").replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/$/, "").trim(); if (p && p.charAt(0) !== "/") p = "/" + p; return p; }
+  function keyOf(rel){ return normRel(rel).toLowerCase(); }
+  function bytes(n){ n = Number(n) || 0; return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " B"; }
+  function hhmmss(t){ var d = new Date(t), p = function(n){ return (n < 10 ? "0" : "") + n; }; return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds()); }
+  function redirectUri(){ if (CFG.redirectUri) return CFG.redirectUri; var p = location.pathname; if (/\/$/.test(p)) p += "index.html"; return location.origin + p; }
+  function lsGet(k){ try{ var v = localStorage.getItem("dbxTest." + k); return v ? JSON.parse(v) : null; }catch(e){ return null; } }
+  function lsSet(k, v){ try{ if (v == null) localStorage.removeItem("dbxTest." + k); else localStorage.setItem("dbxTest." + k, JSON.stringify(v)); }catch(e){} }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------
+  // the device's own storage (IndexedDB): queue = saves waiting to go up; files = this device's copy; meta = listings, history
+  var DBP = null;
+  function db(){
+    if (DBP) return DBP;
+    DBP = new Promise(function(res, rej){
+      var r = indexedDB.open("utzDropboxTest", 1);
+      r.onupgradeneeded = function(){ var d = r.result; d.createObjectStore("queue", { keyPath: "k", autoIncrement: true }); d.createObjectStore("files"); d.createObjectStore("meta"); };
+      r.onsuccess = function(){ res(r.result); }; r.onerror = function(){ rej(r.error); };
+    });
+    return DBP;
+  }
+  function rq(r){ return new Promise(function(res, rej){ r.onsuccess = function(){ res(r.result); }; r.onerror = function(){ rej(r.error); }; }); }
+  function st(name, mode){ return db().then(function(d){ return d.transaction(name, mode || "readonly").objectStore(name); }); }
+  function idbGet(n, k){ return st(n).then(function(s){ return rq(s.get(k)); }); }
+  var QLOG = []; // the queue's changes, newest last (the self-test and the tests read it)
+  function qlog(op, v){ if (QLOG.length > 300) QLOG.shift(); QLOG.push({ t: now(), op: op, k: v && v.k, path: v && v.path, state: v && v.state }); }
+  function idbPut(n, v, k){ if (n === "queue") qlog("put", v); return st(n, "readwrite").then(function(s){ return rq(k === undefined ? s.put(v) : s.put(v, k)); }); }
+  function idbDel(n, k){ if (n === "queue") qlog("del", { k: k }); return st(n, "readwrite").then(function(s){ return rq(s["delete"](k)); }); }
+  function idbAll(n){ return st(n).then(function(s){ return rq(s.getAll()); }); }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------
+  // Dropbox's content_hash: SHA-256 of each 4 MiB block, then SHA-256 of those hashes joined (lower-case hex)
+  function readBuf(blob){
+    if (blob.arrayBuffer) return blob.arrayBuffer();
+    return new Promise(function(res, rej){ var fr = new FileReader(); fr.onload = function(){ res(fr.result); }; fr.onerror = function(){ rej(fr.error); }; fr.readAsArrayBuffer(blob); });
+  }
+  function sha256(buf){ return crypto.subtle.digest("SHA-256", buf); }
+  function hex(buf){ var a = new Uint8Array(buf), s = "", i; for (i = 0; i < a.length; i++) s += (a[i] < 16 ? "0" : "") + a[i].toString(16); return s; }
+  function contentHash(blob){
+    var B = 4 * 1024 * 1024, parts = [], i, acc = [];
+    for (i = 0; i < blob.size; i += B) parts.push(blob.slice(i, i + B));
+    var seq = Promise.resolve();
+    parts.forEach(function(p){ seq = seq.then(function(){ return readBuf(p).then(sha256).then(function(h){ acc.push(new Uint8Array(h)); }); }); });
+    return seq.then(function(){ var all = new Uint8Array(acc.length * 32); acc.forEach(function(h, j){ all.set(h, j * 32); }); return sha256(all.buffer).then(hex); });
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------
+  // the speed log (same layout as the SharePoint panel's "Speed with SharePoint")
+  var SPEED = [];
+  function note(what, t0, status, bg){ SPEED.push({ at: t0, ms: now() - t0, what: what, status: status, bg: !!bg }); if (SPEED.length > 400) SPEED.splice(0, SPEED.length - 400); paintSpeedSoon(); }
+  var speedT = 0;
+  function paintSpeedSoon(){ clearTimeout(speedT); speedT = setTimeout(paintSpeed, 300); }
+  function secs(n){ return n >= 10000 ? Math.round(n / 1000) + " s" : (n / 1000).toFixed(1) + " s"; }
+  function paintSpeed(){
+    var since = now() - 15 * 60000, sp = SPEED.filter(function(x){ return x.at >= since; }), h = "<div style='font-weight:600;margin-bottom:4px'>Speed with Dropbox · last 15 minutes</div>";
+    if (!sp.length){ $("speed").innerHTML = h + "<div class='muted'>No requests yet.</div>"; return; }
+    var fg = sp.filter(function(x){ return !x.bg; }), ms = fg.map(function(x){ return x.ms; }).sort(function(a, b){ return a - b; }), med = ms.length ? ms[ms.length >> 1] : 0;
+    // longpoll is a deliberate wait (Dropbox holds it open until something changes), not a slow request: listed apart
+    var waits = sp.filter(function(x){ return /longpoll/.test(x.what); });
+    var slow = sp.filter(function(x){ return !/longpoll/.test(x.what); }).sort(function(a, b){ return b.ms - a.ms; }).slice(0, 8);
+    h += "<div class='muted' style='margin-bottom:6px'>" + fg.length + " request" + (fg.length === 1 ? "" : "s") + " for what you did" + (ms.length ? " (half took under " + secs(med) + ")" : "") + ", " + (sp.length - fg.length) + " in the background</div>";
+    h += slow.map(function(x){ return "<div><span class='t'>" + hhmmss(x.at) + "</span> " + esc(x.what) + (x.bg ? " (background)" : "") + (x.status && x.status !== 200 ? " — " + esc(x.status) : "") + "<span class='s " + (x.ms >= 1000 ? "slow" : "fast") + "'>" + secs(x.ms) + "</span></div>"; }).join("");
+    if (waits.length) h += "<div class='muted' style='margin-top:6px'>Not counted: " + waits.length + " wait" + (waits.length === 1 ? "" : "s") + " for changes (longpoll -- Dropbox holds each one open until something changes, up to about 30 s).</div>";
+    $("speed").innerHTML = h;
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------
+  // errors: always the plain summary, the HTTP status, Dropbox's request id and the whole body
+  function plainSummary(status, tag){
+    tag = tag || "";
+    if (status === 0) return "No connection to Dropbox (this device is offline, or Dropbox can't be reached). Saves are kept on this device.";
+    if (/conflict/.test(tag)) return "Someone else saved this file first. Your version is kept on this device; nothing was overwritten.";
+    if (status === 401) return "The Dropbox sign-in has run out or was cancelled. Sign in again.";
+    if (status === 429 || /too_many/.test(tag)) return "Dropbox is busy (too many requests or saves at once). It is tried again by itself.";
+    if (/insufficient_space/.test(tag)) return "The Dropbox account is out of space. Saves stay on this device and are tried again.";
+    if (/not_found/.test(tag)) return "Dropbox says the file or folder isn't there.";
+    if (/disallowed_name|malformed_path/.test(tag)) return "Dropbox doesn't accept this file or folder name (a character or ending it doesn't allow). Rename it and save again.";
+    if (/no_write_permission|no_permission|access_denied/.test(tag)) return "This Dropbox account isn't allowed to do this there (check it is an editor of the shared folder).";
+    if (/path_root|invalid_root/.test(tag)) return "This account can't reach that shared folder (is it invited to it?).";
+    if (/missing_scope/.test(tag)) return "The Dropbox app is missing a permission (scope) -- tick it in the App Console, then sign in again.";
+    if (status >= 500) return "Dropbox had a problem on its side. It is tried again by itself.";
+    return "Dropbox refused this (" + status + (tag ? " " + tag : "") + ").";
+  }
+  function mkErr(r, text, what){
+    var tag = "", j = null, ra = 0;
+    try{ j = JSON.parse(text); }catch(e){ j = null; }
+    if (j){ tag = j.error_summary || (j.error && (typeof j.error === "string" ? j.error : j.error[".tag"])) || ""; if (j.error && j.error.retry_after) ra = Number(j.error.retry_after) || 0; }
+    var h = r.headers.get("Retry-After"); if (h && !ra) ra = Number(h) || 0;
+    var e = new Error(plainSummary(r.status, tag));
+    e.dbx = true; e.status = r.status; e.tag = tag; e.body = String(text || "").slice(0, 6000); e.reqId = r.headers.get("X-Dropbox-Request-Id") || ""; e.retryAfter = ra; e.what = what || "";
+    return e;
+  }
+  function netErr(x, what){ var e = new Error(plainSummary(0, "")); e.dbx = true; e.status = 0; e.tag = "network"; e.body = String((x && (x.message || x.name)) || x || ""); e.reqId = ""; e.what = what || ""; return e; }
+  function mkPlainErr(msg, status, tag, body){ var e = new Error(msg); e.dbx = true; e.status = status; e.tag = tag || ""; e.body = body || ""; e.reqId = ""; return e; }
+  function errRec(e){ return { status: e.status, tag: e.tag || "", summary: e.message, body: e.body || "", reqId: e.reqId || "", what: e.what || "", at: now() }; }
+  function errHtml(e){
+    if (!e) return "";
+    return "<div class='err'><b>" + esc(e.summary || e.message || "Something went wrong") + "</b>" +
+      "<div class='muted'>" + (e.what ? esc(e.what) + " · " : "") + "HTTP " + esc(e.status === 0 ? "— (no connection)" : e.status) +
+      " · X-Dropbox-Request-Id: " + esc(e.reqId || (e.status === 0 ? "—" : "(not given to the browser)")) + (e.tag ? " · " + esc(e.tag) : "") + "</div>" +
+      "<div class='mono-safe'>Full answer: " + esc(e.body || "(empty)") + "</div></div>";
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------
+  // sign-in: OAuth2 code + PKCE, refresh token kept here, silent refresh
+  var AUTH = lsGet("auth");       // { access, exp, refresh, accountId }
+  var ACCOUNT = lsGet("account"); // { name, email, id, rootNs, homeNs }
+  function b64url(u8){ var s = "", i; for (i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
+  function randStr(n){ var a = new Uint8Array(n); crypto.getRandomValues(a); return b64url(a).slice(0, n); }
+  function challenge(v){ return sha256(new TextEncoder().encode(v)).then(function(h){ return b64url(new Uint8Array(h)); }); }
+  function signIn(){
+    if (!window.crypto || !crypto.subtle){ showSignInErr({ summary: "This page has to be opened over https (or http://localhost) to sign in -- the browser only allows the sign-in's security code there.", status: 0, body: location.href }); return Promise.resolve(); }
+    var v = randStr(64), state = randStr(20);
+    return challenge(v).then(function(c){
+      var pk = { v: v, st: state, at: now(), redirect: redirectUri() };
+      lsSet("pkce", pk); try{ sessionStorage.setItem("dbxTest.pkce", JSON.stringify(pk)); }catch(e){}
+      var url = CFG.authUrl + "?" + qs({ client_id: CFG.appKey, response_type: "code", code_challenge: c, code_challenge_method: "S256", token_access_type: "offline", redirect_uri: redirectUri(), state: state });
+      // a shell (PC installer / Android) can do the browser part itself: it opens the URL and gives back the address Dropbox sent it to
+      if (window.utzDropboxAuth && typeof window.utzDropboxAuth.authorize === "function") return window.utzDropboxAuth.authorize(url, redirectUri()).then(finishSignIn);
+      location.href = url;
+      return new Promise(function(){});
+    });
+  }
+  function finishSignIn(urlStr){
+    var u = new URL(urlStr, location.href), code = u.searchParams.get("code"), state = u.searchParams.get("state"), er = u.searchParams.get("error");
+    var pk = null; try{ pk = JSON.parse(sessionStorage.getItem("dbxTest.pkce") || "null"); }catch(e){} pk = pk || lsGet("pkce");
+    if (er){ return Promise.reject(mkPlainErr("Dropbox didn't sign you in: " + (u.searchParams.get("error_description") || er), 400, er, urlStr)); }
+    if (!code) return Promise.resolve(null);
+    if (!pk || pk.st !== state) return Promise.reject(mkPlainErr("The sign-in came back without the code this page asked for (state didn't match). Sign in again.", 400, "state_mismatch", urlStr));
+    return tokenCall({ code: code, grant_type: "authorization_code", code_verifier: pk.v, client_id: CFG.appKey, redirect_uri: pk.redirect || redirectUri() }).then(function(a){
+      lsSet("pkce", null); try{ sessionStorage.removeItem("dbxTest.pkce"); }catch(e){}
+      return loadAccount().then(function(){ return a; });
+    });
+  }
+  function tokenCall(params){
+    var t0 = now();
+    return fetch(CFG.tokenUrl, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: qs(params) }).then(function(r){
+      return r.text().then(function(t){
+        note(params.grant_type === "refresh_token" ? "renewing the sign-in" : "signing in", t0, r.status, params.grant_type === "refresh_token");
+        if (!r.ok) throw mkErr(r, t, params.grant_type === "refresh_token" ? "renewing the sign-in" : "signing in");
+        var j = JSON.parse(t);
+        AUTH = { access: j.access_token, exp: now() + (Number(j.expires_in) || 14400) * 1000, refresh: j.refresh_token || (AUTH && AUTH.refresh) || null, accountId: j.account_id || (AUTH && AUTH.accountId) || "" };
+        lsSet("auth", AUTH);
+        return AUTH;
+      });
+    }, function(x){ note("signing in", t0, "offline", false); throw netErr(x, "signing in"); });
+  }
+  var refreshing = null;
+  function refreshToken(){
+    if (refreshing) return refreshing;
+    if (!AUTH || !AUTH.refresh) return Promise.reject(signinErr());
+    refreshing = tokenCall({ grant_type: "refresh_token", refresh_token: AUTH.refresh, client_id: CFG.appKey }).then(function(a){ refreshing = null; return a.access; }, function(e){ refreshing = null; throw e; });
+    return refreshing;
+  }
+  function signinErr(){ var e = new Error(plainSummary(401, "")); e.dbx = true; e.status = 401; e.tag = "not_signed_in"; e.signin = true; e.body = "Not signed in on this device."; e.reqId = ""; return e; }
+  function token(){
+    if (!AUTH || !AUTH.access) return Promise.reject(signinErr());
+    if (AUTH.exp - 60000 > now()) return Promise.resolve(AUTH.access);
+    return refreshToken();
+  }
+  function signOut(){
+    var tok = AUTH && AUTH.access;
+    if (tok) fetch(CFG.api + "/auth/token/revoke", { method: "POST", headers: { Authorization: "Bearer " + tok } }).then(null, function(){});
+    AUTH = null; ACCOUNT = null; lsSet("auth", null); lsSet("account", null); stopWatch();
+    paintAll();
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------
+  // calls. kind: "rpc" (JSON in / out), "upload" / "download" (content endpoints, arguments in Dropbox-API-Arg)
+  var ROOT = lsGet("root"); // { name, ns, path }
+  function P(rel){ rel = normRel(rel); if (ROOT && ROOT.ns) return rel; return ((ROOT && ROOT.path) || "") + rel; }
+  function asciiJson(o){ return JSON.stringify(o).replace(/[\u007f-￿]/g, function(c){ return "\\u" + ("0000" + c.charCodeAt(0).toString(16)).slice(-4); }); }
+  function call(kind, path, arg, body, opt){
+    opt = opt || {}; var t0 = now(), what = opt.what || path;
+    return token().then(function(tok){
+      var h = { Authorization: "Bearer " + tok }, init = { method: "POST", headers: h };
+      if (ROOT && ROOT.ns && !opt.noRoot) h["Dropbox-API-Path-Root"] = JSON.stringify({ ".tag": "namespace_id", namespace_id: String(ROOT.ns) });
+      if (kind === "rpc"){ if (arg !== null && arg !== undefined){ h["Content-Type"] = "application/json"; init.body = JSON.stringify(arg); } }
+      else { h["Dropbox-API-Arg"] = asciiJson(arg); if (kind === "upload"){ h["Content-Type"] = "application/octet-stream"; init.body = body || new Blob([]); } }
+      return fetch((kind === "rpc" ? CFG.api : CFG.content) + path, init).then(null, function(x){ note(what, t0, "offline", opt.bg); throw netErr(x, what); });
+    }).then(function(r){
+      if (r.ok){
+        note(what, t0, r.status, opt.bg);
+        if (kind === "download"){ var res = r.headers.get("Dropbox-API-Result"); return r.blob().then(function(b){ return { blob: b, meta: res ? JSON.parse(res) : null }; }); }
+        return r.text().then(function(t){ return t ? JSON.parse(t) : null; });
+      }
+      return r.text().then(function(t){
+        note(what, t0, r.status, opt.bg);
+        if (r.status === 401 && /expired_access_token/.test(t) && !opt.retried && AUTH && AUTH.refresh){ AUTH.exp = 0; opt.retried = true; return refreshToken().then(function(){ return call(kind, path, arg, body, opt); }); }
+        throw mkErr(r, t, what);
+      });
+    });
+  }
+  function loadAccount(){
+    return call("rpc", "/users/get_current_account", null, null, { noRoot: true, what: "reading your account" }).then(function(a){
+      ACCOUNT = { id: a.account_id, name: (a.name && a.name.display_name) || a.email || "", email: a.email || "", rootNs: a.root_info && a.root_info.root_namespace_id, homeNs: a.root_info && a.root_info.home_namespace_id };
+      lsSet("account", ACCOUNT); paintAll(); return ACCOUNT;
+    });
+  }
+  function who(){ return (ACCOUNT && ACCOUNT.name) || ""; }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------
+  // the shared folder: chosen once, remembered. Paths are then from that folder, the same for the owner and every invited member.
+  function findFolders(){
+    $("folderErr").innerHTML = ""; $("folderList").classList.remove("hidden"); $("folderList").innerHTML = "<div class='muted'>Looking…</div>";
+    var shared = call("rpc", "/sharing/list_folders", { limit: 1000 }, null, { noRoot: true, what: "finding shared folders" }).then(function(r){ return (r && r.entries) || []; }, function(e){ return { err: e }; });
+    var home = call("rpc", "/files/list_folder", { path: "", limit: 2000 }, null, { noRoot: true, what: "listing your Dropbox" }).then(function(r){ return (r && r.entries) || []; }, function(e){ return { err: e }; });
+    return Promise.all([shared, home]).then(function(r){
+      var c = [], seen = {}, errs = [];
+      if (r[0].err) errs.push(r[0].err); else r[0].forEach(function(f){ if (seen[f.shared_folder_id]) return; seen[f.shared_folder_id] = 1; c.push({ name: f.name, ns: String(f.shared_folder_id), path: f.path_lower ? null : null, kind: "shared folder" + (f.access_type ? " (" + (f.access_type[".tag"] || f.access_type) + ")" : "") + (f.path_lower ? "" : " -- not added to your Dropbox yet") }); });
+      if (r[1].err) errs.push(r[1].err); else r[1].forEach(function(f){
+        if (f[".tag"] !== "folder") return;
+        var sid = f.sharing_info && f.sharing_info.shared_folder_id;
+        if (sid){ if (!seen[sid]){ seen[sid] = 1; c.push({ name: f.name, ns: String(sid), kind: "shared folder" }); } }
+        else c.push({ name: f.name, ns: null, path: f.path_display || ("/" + f.name), kind: "folder in your own Dropbox (not shared yet)" });
+      });
+      c.sort(function(a, b){ var au = /utzline/i.test(a.name) ? 0 : 1, bu = /utzline/i.test(b.name) ? 0 : 1; return au - bu || a.name.localeCompare(b.name); });
+      $("folderErr").innerHTML = errs.map(function(e){ return errHtml(errRec(e)); }).join("");
+      $("folderList").innerHTML = c.length ? c.map(function(x, i){ return "<div class='item'><span class='nm'><b>" + esc(x.name) + "</b> <span class='muted'>" + esc(x.kind) + "</span></span><button type='button' data-pick='" + i + "'>Use this folder</button></div>"; }).join("") : "<div class='muted'>No folders found. Make a folder named UTZLINE (or accept the invite to it) and try again.</div>";
+      Array.prototype.forEach.call($("folderList").querySelectorAll("[data-pick]"), function(b){ b.onclick = function(){ pickFolder(c[+b.getAttribute("data-pick")]); }; });
+    });
+  }
+  function pickFolder(x){
+    var prev = ROOT;
+    ROOT = { name: x.name, ns: x.ns || null, path: x.ns ? null : (x.path || null) };
+    return call("rpc", "/files/list_folder", { path: P(""), limit: 1 }, null, { what: "opening " + x.name }).then(function(){
+      lsSet("root", ROOT); $("folderList").classList.add("hidden"); CUR = ""; paintAll(); startWatch(); loadFolder(""); kick();
+    }, function(e){ ROOT = prev; $("folderErr").innerHTML = errHtml(errRec(e)); });
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------
+  // reading
+  function listAll(rel, bg){
+    var out = [], pages = 0;
+    function page(r){ pages++; out = out.concat((r && r.entries) || []); return r && r.has_more ? call("rpc", "/files/list_folder/continue", { cursor: r.cursor }, null, { what: "listing a folder", bg: bg }).then(page) : { entries: out, pages: pages }; }
+    return call("rpc", "/files/list_folder", { path: P(rel), limit: CFG.pageLimit }, null, { what: "listing a folder", bg: bg }).then(page);
+  }
+  function pendingFor(k){ return idbAll("queue").then(function(q){ return q.filter(function(e){ return e.key === k; }); }); }
+  // a file from Dropbox; kept on this device -- unless this device has saves of it still waiting (then the device copy, and the rev those
+  // saves were made from, stay as they are, so a newer save by someone else still shows as a conflict)
+  function download(rel, opt){
+    var k = keyOf(rel);
+    return call("download", "/files/download", { path: P(rel) }, null, { what: "downloading " + base(rel), bg: opt && opt.bg }).then(function(r){
+      return pendingFor(k).then(function(p){
+        if (p.length) return { blob: r.blob, meta: r.meta, kept: false };
+        return idbPut("files", { path: normRel(rel), blob: r.blob, rev: r.meta && r.meta.rev, hash: r.meta && r.meta.content_hash, size: r.blob.size, at: now(), local: false }, k).then(function(){ return { blob: r.blob, meta: r.meta, kept: true }; });
+      });
+    });
+  }
+  function getMeta(rel, what){ return call("rpc", "/files/get_metadata", { path: P(rel) }, null, { what: what || "looking up " + base(rel) }).then(null, function(e){ if (e.status === 409 && /not_found/.test(e.tag)) return null; throw e; }); }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------
+  // writing (one write at a time: Dropbox locks a shared folder per write)
+  var writeChain = Promise.resolve();
+  function writeLock(fn){ var p = writeChain.then(fn, fn); writeChain = p.then(function(){}, function(){}); return p; }
+  function uploadBlob(rel, blob, mode, rev, what, forceSession){
+    var arg = { path: P(rel), mode: mode === "update" ? { ".tag": "update", update: rev } : { ".tag": mode }, autorename: false, mute: true, strict_conflict: true };
+    if (!forceSession && blob.size <= CFG.simpleMax) return call("upload", "/files/upload", arg, blob, { what: what });
+    return uploadSession(arg, blob, what);
+  }
+  function uploadSession(commit, blob, what){
+    var C = CFG.chunk, off = Math.min(C, blob.size), parts = 1;
+    return call("upload", "/files/upload_session/start", { close: false }, blob.slice(0, off), { what: what + " (part 1)" }).then(function(s){
+      var sid = s.session_id;
+      function next(){
+        if (blob.size - off <= C){ parts++; return call("upload", "/files/upload_session/finish", { cursor: { session_id: sid, offset: off }, commit: commit }, blob.slice(off), { what: what + " (last part)" }).then(function(m){ if (m) m.__parts = parts; return m; }); }
+        var end = off + C; parts++;
+        return call("upload", "/files/upload_session/append_v2", { cursor: { session_id: sid, offset: off }, close: false }, blob.slice(off, end), { what: what + " (part " + parts + ")" }).then(function(){ off = end; return next(); });
+      }
+      return next();
+    });
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------
+  // LOCAL-FIRST SAVING. Every save goes into this device first ("saved on this device"); the uploader sends it in order. A save is only
+  // taken off the queue once Dropbox has it AND its content_hash matches what this device sent. Nothing is ever overwritten silently.
+  function saveLocal(rel, blob){
+    rel = normRel(rel); var k = keyOf(rel);
+    if (!rel) return Promise.reject(new Error("No file name."));
+    return contentHash(blob).then(function(h){
+      return Promise.all([idbGet("files", k), pendingFor(k)]).then(function(r){
+        var f = r[0], pend = r[1];
+        var e = { key: k, path: rel, name: base(rel), blob: blob, size: blob.size, hash: h, at: now(), by: who(), state: "waiting", tries: 0, nextAt: 0 };
+        if (pend.length) e.chain = true; // after this device's earlier save of the same file: sent on top of that one
+        else e.baseRev = f && f.rev ? f.rev : null; // the version this save was made from
+        return idbPut("files", { path: rel, blob: blob, rev: f ? f.rev : null, hash: f ? f.hash : null, size: blob.size, at: now(), local: true }, k).then(function(){ return idbPut("queue", e); });
+      });
+    }).then(function(){ paintQueue(); kick(); });
+  }
+  var draining = false, OFFLINE = !navigator.onLine, kickT = 0;
+  function kick(){
+    if (draining) return;
+    draining = true;
+    drain().then(function(){ draining = false; paintQueue(); }, function(e){ draining = false; paintQueue(); if (window.console) console.warn("uploader", e); });
+  }
+  function schedule(ms){ clearTimeout(kickT); kickT = setTimeout(kick, Math.max(50, ms)); }
+  function drain(){
+    if (!AUTH || !ROOT) return Promise.resolve();
+    return idbAll("queue").then(function(all){
+      all.sort(function(a, b){ return a.k - b.k; });
+      var t = now(), blocked = {}, next = null, soonest = 0, i, e;
+      for (i = 0; i < all.length; i++){
+        e = all[i];
+        if (blocked[e.key]) continue;
+        if (e.state === "conflict" || e.state === "failed"){ blocked[e.key] = 1; continue; } // the later saves of that file wait behind it
+        if (e.nextAt > t){ blocked[e.key] = 1; if (!soonest || e.nextAt < soonest) soonest = e.nextAt; continue; }
+        next = e; break;
+      }
+      if (!next){ if (soonest) schedule(soonest - now()); return; }
+      return sendOne(next).then(function(go){ if (go) return drain(); });
+    });
+  }
+  function sendOne(e){
+    e.state = "uploading";
+    return idbPut("queue", e).then(function(){ paintQueue(); return idbGet("files", e.key); }).then(function(f){
+      var rev = e.chain ? (f && f.rev) || null : e.baseRev, mode = e.overwrite ? "overwrite" : (rev ? "update" : "add"), t0 = now();
+      return writeLock(function(){ return uploadBlob(e.path, e.blob, mode, rev, "saving " + e.name); }).then(function(meta){
+        if (!meta || meta.content_hash !== e.hash){
+          var x = new Error("Dropbox has different bytes than this device sent (content_hash didn't match). The save is kept here; tap Retry.");
+          x.dbx = true; x.status = 200; x.tag = "content_hash_mismatch"; x.body = JSON.stringify(meta || {}); x.reqId = ""; x.what = "checking " + e.name;
+          e.state = "failed"; e.err = errRec(x); return idbPut("queue", e).then(function(){ return true; });
+        }
+        return Promise.all([pendingFor(e.key), idbGet("files", e.key)]).then(function(r){
+          var more = r[0].some(function(q){ return q.k !== e.k; }), fr = r[1] || {};
+          return idbPut("files", { path: e.path, blob: more ? fr.blob : e.blob, rev: meta.rev, hash: meta.content_hash, size: more ? fr.size : e.size, at: now(), local: more, serverModified: meta.server_modified }, e.key);
+        }).then(function(){ return idbDel("queue", e.k); }).then(function(){
+          return idbGet("meta", "history").then(function(h){ h = h || []; h.unshift({ path: e.path, rev: meta.rev, size: e.size, at: now(), ms: now() - t0, by: e.by, copy: !!e.copyOf }); return idbPut("meta", h.slice(0, 40), "history"); });
+        }).then(function(){ setOffline(false); return true; });
+      }, function(err){ return onFail(e, err); });
+    });
+  }
+  function onFail(e, err){
+    var t = now(); e.tries = (e.tries || 0) + 1; e.err = errRec(err);
+    if (err.status === 0){ e.state = "waiting"; e.nextAt = t + 3000; setOffline(true); return idbPut("queue", e).then(function(){ return false; }); } // offline: stop until back
+    if (err.signin || err.status === 401){ e.state = "waiting"; e.nextAt = t + 30000; return idbPut("queue", e).then(function(){ return false; }); }
+    if (/conflict/.test(err.tag || "")){ e.state = "conflict"; return idbPut("queue", e).then(function(){ return true; }); }
+    if (err.status === 429 || err.status >= 500 || /too_many_write_operations|too_many_requests|insufficient_space|internal_error/.test(err.tag || "")){
+      var ms = err.retryAfter ? err.retryAfter * 1000 : BACKOFF[Math.min(e.tries - 1, BACKOFF.length - 1)];
+      e.state = "waiting"; e.nextAt = t + ms; return idbPut("queue", e).then(function(){ schedule(ms); return true; });
+    }
+    e.state = "failed"; return idbPut("queue", e).then(function(){ return true; });
+  }
+  function retryEntry(k, how){
+    return idbAll("queue").then(function(q){
+      var e = q.filter(function(x){ return x.k === k; })[0]; if (!e) return;
+      if (how === "copy"){ // keep both: mine goes up as a copy beside theirs (nothing is lost, nothing overwritten)
+        var d = new Date(), p = function(n){ return (n < 10 ? "0" : "") + n; }, stamp = d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + "-" + p(d.getMinutes());
+        var dot = e.path.lastIndexOf("."), slash = e.path.lastIndexOf("/");
+        var stemEnd = dot > slash ? dot : e.path.length;
+        e.copyOf = e.path; e.path = e.path.slice(0, stemEnd) + " (conflict " + (who() || "this device") + " " + stamp + ")" + e.path.slice(stemEnd);
+        e.key = keyOf(e.path); e.name = base(e.path); e.baseRev = null; e.chain = false; e.overwrite = false;
+      } else if (how === "overwrite"){ e.overwrite = true; }
+      e.state = "waiting"; e.nextAt = 0; e.err = null;
+      return idbPut("queue", e);
+    }).then(function(){ paintQueue(); kick(); });
+  }
+  function saveToDevice(blob, name){
+    var a = document.createElement("a"), u = URL.createObjectURL(blob);
+    a.href = u; a.download = name || "file"; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(u); }, 60000);
+  }
+  function setOffline(v){ if (OFFLINE === v) return; OFFLINE = v; paintNet(); }
+  window.addEventListener("online", function(){ setOffline(false); kick(); startWatch(); });
+  window.addEventListener("offline", function(){ setOffline(true); });
+  setInterval(function(){ if (!draining) kick(); }, 15000);
+
+  // ---------------------------------------------------------------------------------------------------------------------------------
+  // change detection: a cursor on the whole folder; longpoll waits for a change (polling every 30 s when longpoll isn't available)
+  var WATCH = { cursor: null, on: false, gen: 0, mode: "" };
+  function stopWatch(){ WATCH.on = false; WATCH.gen++; }
+  function startWatch(){
+    if (!AUTH || !ROOT) return;
+    stopWatch(); WATCH.on = true; var gen = WATCH.gen;
+    call("rpc", "/files/list_folder/get_latest_cursor", { path: P(""), recursive: true }, null, { what: "starting the change check", bg: true }).then(function(r){
+      if (gen !== WATCH.gen) return; WATCH.cursor = r.cursor; loopWatch(gen);
+    }, function(){ if (gen === WATCH.gen) setTimeout(function(){ if (gen === WATCH.gen) startWatch(); }, CFG.pollMs); });
+  }
+  function longpoll(cursor, timeout){
+    var t0 = now();
+    return fetch(CFG.notify + "/files/list_folder/longpoll", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cursor: cursor, timeout: timeout }) }).then(function(r){
+      return r.text().then(function(t){ note("waiting for changes (longpoll)", t0, r.status, true); if (!r.ok) throw mkErr(r, t, "waiting for changes"); return JSON.parse(t); });
+    }, function(x){ throw netErr(x, "waiting for changes"); });
+  }
+  function changesSince(cursor, bg){
+    var out = [];
+    function page(r){ out = out.concat(r.entries || []); return r.has_more ? call("rpc", "/files/list_folder/continue", { cursor: r.cursor }, null, { what: "reading changes", bg: bg }).then(page) : { entries: out, cursor: r.cursor }; }
+    return call("rpc", "/files/list_folder/continue", { cursor: cursor }, null, { what: "reading changes", bg: bg }).then(page);
+  }
+  function loopWatch(gen){
+    if (gen !== WATCH.gen || !WATCH.on) return;
+    var useLong = WATCH.mode !== "poll";
+    (useLong ? longpoll(WATCH.cursor, CFG.longpollTimeout).then(function(r){ WATCH.mode = "longpoll"; return r; }, function(e){ WATCH.mode = "poll"; return wait(CFG.pollMs).then(function(){ return { changes: true, poll: true }; }); }) : wait(CFG.pollMs).then(function(){ return { changes: true, poll: true }; })).then(function(r){
+      if (gen !== WATCH.gen) return;
+      paintWatchNote();
+      var after = r && r.backoff ? r.backoff * 1000 : 0;
+      if (!r || !r.changes) return wait(after).then(function(){ loopWatch(gen); });
+      return changesSince(WATCH.cursor, true).then(function(c){
+        if (gen !== WATCH.gen) return;
+        WATCH.cursor = c.cursor;
+        if (c.entries.length) onRemoteChanges(c.entries);
+        return wait(after).then(function(){ loopWatch(gen); });
+      });
+    }).then(null, function(){ if (gen === WATCH.gen) setTimeout(function(){ loopWatch(gen); }, CFG.pollMs); });
+  }
+  var LAST_CHANGE = null;
+  function onRemoteChanges(entries){
+    LAST_CHANGE = { at: now(), n: entries.length, names: entries.slice(0, 5).map(function(x){ return x.name; }) };
+    var curKey = keyOf(CUR);
+    var touchesCur = entries.some(function(x){ var pl = String(x.path_lower || ""); if (ROOT && !ROOT.ns && ROOT.path) pl = pl.slice(ROOT.path.length); return dirOf(pl).toLowerCase() === curKey; });
+    paintWatchNote();
+    if (touchesCur) loadFolder(CUR, true);
+  }
+  function paintWatchNote(){
+    $("watchNote").textContent = (WATCH.mode === "poll" ? "Checking for changes every " + Math.round(CFG.pollMs / 1000) + " s" : WATCH.mode === "longpoll" ? "Watching for changes (longpoll)" : "") +
+      (LAST_CHANGE ? " · last change seen " + hhmmss(LAST_CHANGE.at) + " (" + LAST_CHANGE.names.join(", ") + ")" : "");
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------
+  // the file list
+  var CUR = "", LISTED = [], listGen = 0;
+  function loadFolder(rel, quiet){
+    CUR = normRel(rel); paintCrumbs(); if (!quiet) $("filesErr").innerHTML = "";
+    var my = ++listGen, at = CUR; // only the newest listing is shown (an older one finishing late never replaces it)
+    return listAll(at).then(function(r){
+      if (my !== listGen) return;
+      LISTED = r.entries; idbPut("meta", { at: now(), entries: r.entries }, "list:" + keyOf(at)).then(null, function(){});
+      paintFiles(r.pages);
+    }, function(e){
+      if (my !== listGen) return;
+      $("filesErr").innerHTML = errHtml(errRec(e));
+      return idbGet("meta", "list:" + keyOf(at)).then(function(l){ if (l && my === listGen){ LISTED = l.entries; paintFiles(0, l.at); } });
+    });
+  }
+  function paintCrumbs(){
+    var parts = CUR.split("/").filter(Boolean), h = "<a data-go=''>" + esc((ROOT && ROOT.name) || "UTZLINE") + "</a>", acc = "";
+    parts.forEach(function(p){ acc += "/" + p; h += " / <a data-go='" + esc(acc) + "'>" + esc(p) + "</a>"; });
+    $("crumbs").innerHTML = h;
+    Array.prototype.forEach.call($("crumbs").querySelectorAll("[data-go]"), function(a){ a.onclick = function(){ loadFolder(a.getAttribute("data-go")); }; });
+  }
+  function paintFiles(pages, offlineAt){
+    var ents = LISTED.slice().sort(function(a, b){ var fa = a[".tag"] === "folder" ? 0 : 1, fb = b[".tag"] === "folder" ? 0 : 1; return fa - fb || String(a.name).localeCompare(String(b.name)); });
+    var h = offlineAt ? "<div class='muted'>From this device (listed " + hhmmss(offlineAt) + ") -- Dropbox can't be reached just now.</div>" : (pages > 1 ? "<div class='muted'>" + ents.length + " items (" + pages + " pages from Dropbox)</div>" : "");
+    h += ents.map(function(x, i){
+      var rel = (CUR ? CUR : "") + "/" + x.name;
+      if (x[".tag"] === "folder") return "<div class='item'><span class='nm'>📁 <a href='#' data-open-dir='" + esc(rel) + "'>" + esc(x.name) + "</a></span>" + (x.sharing_info ? "<span class='chip'>shared</span>" : "") + "</div>";
+      if (x[".tag"] !== "file") return "";
+      return "<div class='item' data-file='" + esc(keyOf(rel)) + "'><span class='nm'>" + esc(x.name) + " <span class='muted'>" + bytes(x.size) + " · " + esc(String(x.server_modified || "").replace("T", " ").replace("Z", "")) + "</span></span><button type='button' data-open='" + i + "'>Open</button><button type='button' data-dev='" + i + "'>Save to this device</button></div>";
+    }).join("") || "<div class='muted'>Empty folder.</div>";
+    $("fileList").innerHTML = h;
+    Array.prototype.forEach.call($("fileList").querySelectorAll("[data-open-dir]"), function(a){ a.onclick = function(ev){ ev.preventDefault(); loadFolder(a.getAttribute("data-open-dir")); }; });
+    Array.prototype.forEach.call($("fileList").querySelectorAll("[data-open]"), function(b){ b.onclick = function(){ openFile(ents[+b.getAttribute("data-open")]); }; });
+    Array.prototype.forEach.call($("fileList").querySelectorAll("[data-dev]"), function(b){ b.onclick = function(){ var x = ents[+b.getAttribute("data-dev")]; fileBlob((CUR ? CUR : "") + "/" + x.name).then(function(bl){ saveToDevice(bl, x.name); }, function(e){ $("filesErr").innerHTML = errHtml(errRec(e)); }); }; });
+  }
+  // this device's copy first; Dropbox when there isn't one (or it's older than the listing)
+  function fileBlob(rel){
+    var k = keyOf(rel), listed = LISTED.filter(function(x){ return x.name.toLowerCase() === base(rel).toLowerCase(); })[0];
+    return idbGet("files", k).then(function(f){
+      if (f && f.blob && (f.local || !listed || f.rev === listed.rev)) return f.blob;
+      return download(rel).then(function(r){ return r.blob; });
+    });
+  }
+  var TEXTY = /\.(txt|json|csv|md|log|xml|html?)$/i;
+  function openFile(x){
+    var rel = (CUR ? CUR : "") + "/" + x.name;
+    fileBlob(rel).then(function(bl){
+      if (TEXTY.test(x.name) && bl.size <= 2 * 1024 * 1024) return bl.text().then(function(t){ $("edPath").value = rel; $("edText").value = t; paintEditStatus(); $("secEdit").scrollIntoView({ behavior: "smooth" }); });
+      $("edStatus").textContent = x.name + ": " + bytes(bl.size) + " -- on this device (use Save to this device to keep a copy).";
+    }, function(e){ $("filesErr").innerHTML = errHtml(errRec(e)); });
+  }
+  function paintEditStatus(){
+    var k = keyOf($("edPath").value);
+    Promise.all([pendingFor(k), idbGet("files", k)]).then(function(r){
+      var q = r[0], f = r[1], s = "";
+      if (q.some(function(e){ return e.state === "conflict"; })) s = "Saved on this device · CONFLICT -- someone else saved first (see Saves on this device)";
+      else if (q.some(function(e){ return e.state === "failed"; })) s = "Saved on this device · Dropbox refused it (see Saves on this device)";
+      else if (q.length) s = "Saved on this device · waiting to go up";
+      else if (f && f.rev) s = "In Dropbox · rev " + String(f.rev).slice(0, 9);
+      $("edStatus").textContent = s;
+    });
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------
+  // the queue on screen
+  function paintQueue(){
+    Promise.all([idbAll("queue"), idbGet("meta", "history")]).then(function(r){
+      var q = r[0].sort(function(a, b){ return a.k - b.k; }), hist = r[1] || [];
+      var n = { waiting: 0, uploading: 0, conflict: 0, failed: 0 };
+      q.forEach(function(e){ n[e.state] = (n[e.state] || 0) + 1; });
+      var parts = [];
+      if (n.uploading) parts.push(n.uploading + " sending");
+      if (n.waiting) parts.push(n.waiting + " waiting");
+      if (n.conflict) parts.push(n.conflict + " conflict" + (n.conflict === 1 ? "" : "s"));
+      if (n.failed) parts.push(n.failed + " refused");
+      $("queueSummary").innerHTML = q.length ? "<b>" + q.length + " save" + (q.length === 1 ? "" : "s") + " waiting</b> (" + parts.join(", ") + ") — all kept on this device." : "Nothing waiting. Every save is in Dropbox.";
+      $("queueList").innerHTML = q.map(function(e){
+        var chip = e.state === "conflict" ? "<span class='chip bad'>conflict</span>" : e.state === "failed" ? "<span class='chip bad'>refused</span>" : e.state === "uploading" ? "<span class='chip warn'>sending</span>" : "<span class='chip warn'>waiting" + (e.nextAt > now() ? " (next try " + hhmmss(e.nextAt) + ")" : "") + "</span>";
+        var btns = "<button type='button' data-dev-q='" + e.k + "'>Save to this device</button>";
+        if (e.state === "conflict") btns += "<button type='button' data-copy='" + e.k + "'>Keep both (send mine as a copy)</button><button type='button' data-over='" + e.k + "'>Replace theirs with mine</button>";
+        if (e.state === "failed" || (e.state === "waiting" && e.err)) btns += "<button type='button' data-retry='" + e.k + "'>Retry</button>";
+        return "<div class='item' data-q='" + e.k + "' data-state='" + e.state + "'><span class='nm'><b>" + esc(e.path) + "</b> <span class='muted'>" + bytes(e.size) + " · saved " + hhmmss(e.at) + (e.copyOf ? " · copy of " + esc(e.copyOf) : "") + "</span></span>" + chip + btns + (e.err ? "<div style='flex-basis:100%'>" + errHtml(e.err) + "</div>" : "") + "</div>";
+      }).join("");
+      $("historyList").innerHTML = hist.map(function(h){ return "<div class='item'><span class='nm'>" + esc(h.path) + " <span class='muted'>rev " + esc(String(h.rev).slice(0, 9)) + " · " + bytes(h.size) + " · " + hhmmss(h.at) + " · " + secs(h.ms) + "</span></span><span class='chip ok'>uploaded</span></div>"; }).join("") || "<div class='muted'>Nothing yet.</div>";
+      Array.prototype.forEach.call($("queueList").querySelectorAll("[data-dev-q]"), function(b){ b.onclick = function(){ var e = q.filter(function(x){ return x.k === +b.getAttribute("data-dev-q"); })[0]; if (e) saveToDevice(e.blob, e.name); }; });
+      Array.prototype.forEach.call($("queueList").querySelectorAll("[data-copy]"), function(b){ b.onclick = function(){ retryEntry(+b.getAttribute("data-copy"), "copy"); }; });
+      Array.prototype.forEach.call($("queueList").querySelectorAll("[data-over]"), function(b){ b.onclick = function(){ if (window.confirm("Replace the version in Dropbox (saved by someone else) with yours? Theirs stays in Dropbox's version history.")) retryEntry(+b.getAttribute("data-over"), "overwrite"); }; });
+      Array.prototype.forEach.call($("queueList").querySelectorAll("[data-retry]"), function(b){ b.onclick = function(){ retryEntry(+b.getAttribute("data-retry")); }; });
+      paintEditStatus();
+    });
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------
+  // SELF-TEST
+  function xorshiftBlob(n, seed){
+    var u = new Uint32Array(Math.ceil(n / 4)), x = seed >>> 0 || 2463534242, i;
+    for (i = 0; i < u.length; i++){ x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0; u[i] = x; }
+    return new Blob([new Uint8Array(u.buffer, 0, n)], { type: "application/octet-stream" });
+  }
+  function selfTest(){
+    var out = [], dir = SELFTEST_DIR, t0all = now(), stamp = new Date().toISOString();
+    $("btnTest").disabled = true; $("testNote").textContent = "Running…";
+    function paint(){
+      $("testOut").innerHTML = "<table><tr><th>Step</th><th>Result</th><th>Time</th><th>Details</th></tr>" + out.map(function(s){ return "<tr data-step='" + esc(s.id) + "'><td>" + esc(s.name) + "</td><td class='" + (s.ok ? "pass'>PASS" : "fail'>FAIL") + "</td><td>" + secs(s.ms) + "</td><td>" + esc(s.detail || "") + (s.err ? errHtml(errRec(s.err)) : "") + "</td></tr>"; }).join("") + "</table>";
+    }
+    function step(id, name, fn){
+      var t0 = now();
+      return fn().then(function(d){ out.push({ id: id, name: name, ok: true, ms: now() - t0, detail: d }); paint(); }, function(e){ out.push({ id: id, name: name, ok: false, ms: now() - t0, detail: (e && e.message) || String(e), err: e && e.dbx ? e : null }); paint(); });
+    }
+    function put(rel, blob, opt){
+      return writeLock(function(){ return getMeta(rel, "looking up " + base(rel)).then(function(m){ return uploadBlob(rel, blob, m ? "update" : "add", m ? m.rev : null, "self-test: saving " + base(rel), opt && opt.session); }); });
+    }
+    var rev1 = null, rev2 = null, text2 = "";
+    var p = step("access", "Signed in and the folder can be read", function(){
+      return loadAccount().then(function(a){ return listAll("").then(function(r){ return a.name + " · " + ((ROOT && ROOT.name) || "") + (ROOT && ROOT.ns ? " (shared folder " + ROOT.ns + ", via Dropbox-API-Path-Root)" : " (" + ((ROOT && ROOT.path) || "") + ")") + " · " + r.entries.length + " items at the top"; }); });
+    }).then(function(){
+      return step("write", "Write a small file and read it back", function(){
+        var text = "UTZLINE self-test " + stamp + " #1 " + Math.random().toString(36).slice(2), blob = new Blob([text], { type: "text/plain" });
+        return contentHash(blob).then(function(h){ return put(dir + "/small.txt", blob).then(function(m){
+          if (m.content_hash !== h) throw new Error("content_hash from Dropbox (" + m.content_hash + ") isn't this file's (" + h + ")");
+          rev1 = m.rev;
+          return download(dir + "/small.txt").then(function(r){ return r.blob.text(); }).then(function(back){ if (back !== text) throw new Error("Read back something else: " + back.slice(0, 80)); return "rev " + rev1 + " · content_hash matches · read back the same " + text.length + " bytes"; });
+        }); });
+      });
+    }).then(function(){
+      return step("rev", "Overwrite using the file's rev", function(){
+        if (!rev1) return Promise.reject(new Error("skipped: the write step failed"));
+        text2 = "UTZLINE self-test " + stamp + " #2 " + Math.random().toString(36).slice(2);
+        return writeLock(function(){ return uploadBlob(dir + "/small.txt", new Blob([text2]), "update", rev1, "self-test: overwrite by rev"); }).then(function(m){
+          rev2 = m.rev; if (rev2 === rev1) throw new Error("The rev didn't change");
+          return download(dir + "/small.txt").then(function(r){ return r.blob.text(); }).then(function(back){ if (back !== text2) throw new Error("Read back something else"); return "rev " + rev1 + " → " + rev2; });
+        });
+      });
+    }).then(function(){
+      return step("conflict", "A conflict is detected, not overwritten", function(){
+        if (!rev1 || !rev2) return Promise.reject(new Error("skipped: the earlier steps failed"));
+        return writeLock(function(){ return uploadBlob(dir + "/small.txt", new Blob(["this must NOT replace the file"]), "update", rev1, "self-test: save from an old rev"); }).then(function(){
+          throw new Error("Dropbox took a save made from an old rev -- it overwrote the newer file");
+        }, function(e){
+          if (!(e && e.status === 409 && /conflict/.test(e.tag))) throw e;
+          return download(dir + "/small.txt").then(function(r){ return r.blob.text(); }).then(function(back){ if (back !== text2) throw new Error("The file changed after the refused save"); return "409 " + e.tag + " · request id " + (e.reqId || "(not given)") + " · the newer file is unchanged"; });
+        });
+      });
+    }).then(function(){
+      return step("chunked", "Chunked upload (~" + Math.round(CFG.bigTestBytes / 1048576) + " MB in " + Math.round(CFG.chunk / 1048576) + " MB parts)", function(){
+        var blob = xorshiftBlob(CFG.bigTestBytes, (now() & 0xffffffff) >>> 0), t0 = now();
+        return contentHash(blob).then(function(h){ return put(dir + "/big-test.bin", blob, { session: true }).then(function(m){
+          if (m.content_hash !== h) throw new Error("content_hash didn't match after the chunked upload");
+          var s = (now() - t0) / 1000;
+          return bytes(blob.size) + " in " + (m.__parts || "?") + " parts, " + s.toFixed(1) + " s (" + (blob.size / 1048576 / Math.max(s, 0.001)).toFixed(1) + " MB/s) · content_hash matches";
+        }); });
+      });
+    }).then(function(){
+      return step("list", "List the folder (with paging)", function(){
+        return listAll(dir).then(function(r){
+          var names = r.entries.map(function(x){ return x.name; });
+          if (names.indexOf("small.txt") === -1 || names.indexOf("big-test.bin") === -1) throw new Error("Listed " + names.join(", ") + " -- missing the files just written");
+          return r.entries.length + " items in " + r.pages + " page" + (r.pages === 1 ? "" : "s");
+        });
+      });
+    }).then(function(){
+      return step("change", "The change cursor sees a new change", function(){
+        return call("rpc", "/files/list_folder/get_latest_cursor", { path: P(dir), recursive: false }, null, { what: "self-test: change cursor" }).then(function(c){
+          var t0 = now(), how = "longpoll";
+          var lp = longpoll(c.cursor, 30).then(function(r){ return r; }, function(e){ how = "polling (longpoll not available: " + e.message + ")"; return null; });
+          return wait(800).then(function(){ return put(dir + "/change.txt", new Blob(["change " + stamp])); }).then(function(){ return lp; }).then(function(r){
+            if (r && !r.changes) throw new Error("longpoll returned no change");
+            function look(tries){ return changesSince(c.cursor).then(function(ch){ var hit = ch.entries.filter(function(x){ return x.name === "change.txt"; })[0]; if (hit) return hit; if (tries <= 0) throw new Error("The change wasn't in list_folder/continue"); return wait(2000).then(function(){ return look(tries - 1); }); }); }
+            return look(r ? 0 : 10).then(function(hit){ return "seen by " + how + " in " + secs(now() - t0) + " (" + hit.name + ", rev " + String(hit.rev).slice(0, 9) + ")"; });
+          });
+        });
+      });
+    }).then(function(){
+      return step("queue", "A local-first save goes up (queue)", function(){
+        var rel = dir + "/queued.txt", t0 = now();
+        return saveLocal(rel, new Blob(["queued " + stamp])).then(function(){
+          function check(n){ return pendingFor(keyOf(rel)).then(function(q){ if (!q.length) return; var bad = q.filter(function(e){ return e.state === "conflict" || e.state === "failed"; })[0]; if (bad) throw new Error("The queued save was " + bad.state + ": " + (bad.err && bad.err.summary)); if (n <= 0) throw new Error("Still waiting after 60 s"); return wait(500).then(function(){ return check(n - 1); }); }); }
+          return check(120).then(function(){ return idbGet("files", keyOf(rel)); }).then(function(f){ return "saved on this device, then in Dropbox in " + secs(now() - t0) + " (rev " + String(f && f.rev).slice(0, 9) + ")"; });
+        });
+      });
+    });
+    return p.then(function(){
+      var ok = out.every(function(s){ return s.ok; });
+      $("testNote").innerHTML = "<span class='" + (ok ? "pass'>Self-test PASSED" : "fail'>Self-test FAILED") + "</span> in " + secs(now() - t0all) + " — see the speed table below.";
+      $("btnTest").disabled = false; paintSpeed();
+      window.__dbxLastSelfTest = { ok: ok, steps: out.map(function(s){ return { id: s.id, ok: s.ok, detail: s.detail }; }) };
+      return window.__dbxLastSelfTest;
+    });
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------
+  // screen
+  function paintNet(){ var off = OFFLINE || !navigator.onLine; $("net").textContent = off ? "Offline — working from this device" : "Online"; $("net").className = "net" + (off ? " off" : ""); }
+  function showSignInErr(e){ $("signInErr").innerHTML = errHtml(e); }
+  function paintAll(){
+    $("redir").textContent = redirectUri();
+    var signed = !!(AUTH && AUTH.access);
+    $("btnSignIn").classList.toggle("hidden", signed); $("btnSignOut").classList.toggle("hidden", !signed);
+    $("who").textContent = signed ? ((ACCOUNT && ACCOUNT.name) || "Signed in") + (ACCOUNT && ACCOUNT.email ? " (" + ACCOUNT.email + ")" : "") + (ROOT ? " · " + ROOT.name : "") : "Not signed in";
+    $("secFolder").classList.toggle("hidden", !signed);
+    $("folderNow").innerHTML = ROOT ? "Using <b>" + esc(ROOT.name) + "</b> " + (ROOT.ns ? "<span class='muted'>(shared folder " + esc(ROOT.ns) + ", reached the same way by every member)</span>" : "<span class='muted'>(" + esc(ROOT.path) + " in your own Dropbox -- share it to let others in)</span>") : "Not chosen yet.";
+    ["secFiles", "secEdit", "secTest"].forEach(function(id){ $(id).classList.toggle("hidden", !(signed && ROOT)); });
+    paintNet();
+  }
+  $("btnSignIn").onclick = function(){ $("signInErr").innerHTML = ""; signIn().then(null, function(e){ showSignInErr(errRec(e)); }); };
+  $("btnSignOut").onclick = signOut;
+  $("btnFindFolders").onclick = function(){ findFolders(); };
+  $("btnRefresh").onclick = function(){ loadFolder(CUR); };
+  $("btnSendNow").onclick = function(){ idbAll("queue").then(function(q){ return Promise.all(q.filter(function(e){ return e.state === "waiting"; }).map(function(e){ e.nextAt = 0; return idbPut("queue", e); })); }).then(function(){ setOffline(!navigator.onLine); kick(); }); };
+  $("btnSave").onclick = function(){
+    var rel = normRel($("edPath").value);
+    saveLocal(rel, new Blob([$("edText").value], { type: "text/plain" })).then(function(){ $("edStatus").textContent = "Saved on this device · waiting to go up"; }, function(e){ $("edStatus").textContent = (e && e.message) || String(e); });
+  };
+  $("btnSaveDevice").onclick = function(){ saveToDevice(new Blob([$("edText").value], { type: "text/plain" }), base(normRel($("edPath").value)) || "note.txt"); };
+  $("edPath").addEventListener("change", paintEditStatus);
+  $("btnTest").onclick = function(){ selfTest(); };
+  // drop box (drag and drop only; on a touch-only tablet a long press opens the picker -- nothing can be dragged there)
+  (function(){
+    var d = $("drop"), pressT = 0;
+    function take(files){ Array.prototype.forEach.call(files || [], function(f){ saveLocal((CUR ? CUR : "") + "/" + f.name, f); }); }
+    d.addEventListener("dragover", function(ev){ ev.preventDefault(); d.classList.add("over"); });
+    d.addEventListener("dragleave", function(){ d.classList.remove("over"); });
+    d.addEventListener("drop", function(ev){ ev.preventDefault(); d.classList.remove("over"); take(ev.dataTransfer && ev.dataTransfer.files); });
+    var touchOnly = window.matchMedia && matchMedia("(pointer: coarse)").matches && !matchMedia("(hover: hover)").matches;
+    if (touchOnly){
+      d.textContent = "Drop files here -- or press and hold here to choose files (this device can't drag).";
+      d.addEventListener("pointerdown", function(){ pressT = setTimeout(function(){ var i = document.createElement("input"); i.type = "file"; i.multiple = true; i.onchange = function(){ take(i.files); }; i.click(); }, 600); });
+      ["pointerup", "pointercancel", "pointerleave"].forEach(function(t){ d.addEventListener(t, function(){ clearTimeout(pressT); }); });
+    }
+  })();
+
+  // test hooks (the stand-in Dropbox tests drive the page through these)
+  window.__dbxTest = { saveLocal: saveLocal, kick: kick, selfTest: selfTest, queue: function(){ return idbAll("queue"); }, files: function(k){ return idbGet("files", keyOf(k)); }, root: function(){ return ROOT; }, auth: function(){ return AUTH; }, loadFolder: loadFolder, findFolders: findFolders, watch: function(){ return { mode: WATCH.mode, last: LAST_CHANGE }; }, speed: function(){ return SPEED.slice(); }, qlog: function(){ return QLOG.slice(); }, version: APP_VERSION };
+
+  // ---------------------------------------------------------------------------------------------------------------------------------
+  // start: finish a sign-in Dropbox sent back here; saves that were mid-send when the app closed are sent again
+  function start(){
+    paintAll(); paintSpeed();
+    var u = new URL(location.href);
+    var back = (u.searchParams.get("code") || u.searchParams.get("error")) ? finishSignIn(location.href).then(function(){ history.replaceState(null, "", location.pathname); }, function(e){ history.replaceState(null, "", location.pathname); showSignInErr(errRec(e)); }) : Promise.resolve();
+    return back.then(function(){
+      return idbAll("queue").then(function(q){ return Promise.all(q.filter(function(e){ return e.state === "uploading"; }).map(function(e){ e.state = "waiting"; return idbPut("queue", e); })); });
+    }).then(function(){
+      paintAll(); paintQueue();
+      if (AUTH && AUTH.access && !ACCOUNT) loadAccount().then(null, function(){});
+      if (AUTH && ROOT){ loadFolder(""); startWatch(); kick(); }
+    });
+  }
+  start();
+  if ("serviceWorker" in navigator && /^https:|^http:\/\/(localhost|127\.0\.0\.1)/.test(location.href) && !window.DropboxTestConfig) navigator.serviceWorker.register("service-worker.js").then(null, function(){});
+})();
+</script>
+</body>
+</html>
