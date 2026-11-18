@@ -29,14 +29,10 @@ python3 -m http.server 8765
 
 Open `http://localhost:8765/index.html` in Chrome.
 
-For a phone: GitHub Pages (`.github/workflows/dropbox-test-pages.yml` publishes only this folder).
-1. Once only: in the repo, go to Settings → Pages → Source: **GitHub Actions**.
-2. Settings → Environments → **github-pages** → Deployment branches: add `claude/youthful-lovelace-6bb2yq`. By default only `main` may publish.
-3. Actions → **Dropbox Test on GitHub Pages** → Run workflow (on that branch). After that it runs by itself when this folder changes.
-4. Dropbox App Console redirect URI: `https://utzy79.github.io/utzline-source/index.html`.
-5. On the phone, open `https://utzy79.github.io/utzline-source/index.html`.
-
-GitHub Pages from a private repo needs a paid GitHub plan (Pro or Team). The published page is public, but it holds no secrets.
+For a phone: the app is published from its own small public repo, **utzy79/utzline-dropbox-test**, a copy of this folder only. utzline-source stays private, and Pages on a private repo needs a paid plan.
+- Address: `https://utzy79.github.io/utzline-dropbox-test/index.html` (also a Dropbox redirect URI).
+- Pages setting there: Deploy from a branch, `main`, `/ (root)`.
+- When this folder changes, copy it into that repo (with `.nojekyll`) and push. The Code session does this.
 
 ## Trial checklist (acceptance)
 
