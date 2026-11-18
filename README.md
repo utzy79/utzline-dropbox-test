@@ -1,6 +1,6 @@
 # UTZLINE Dropbox Test
 
-Current version: v8 (RC 1.0)
+Current version: v9 (RC 1.0)
 
 A separate test app. It proves Dropbox can replace SharePoint as the UTZLINE cloud store.
 It does not touch the 18 apps or any SharePoint code. It is not in `native-trial/apps.json`, `build_apps.py` or the installers: a PWA zip is enough.
@@ -49,6 +49,23 @@ For a phone: the app is published from its own small public repo, **utzy79/utzli
 - An invited member reaches the shared folder through `Dropbox-API-Path-Root` with the folder's id.
 - `X-Dropbox-Request-Id` can be read by the page. If it can't, the page shows "(not given to the browser)".
 - The Standard plan allows API apps for every member.
+
+## Load test (v9): will Dropbox cope?
+
+Section **6 · Load test** saves many small records at once. Each "writer" stands in for one device.
+
+For the real picture:
+
+1. On 3 or 4 devices at once (PCs, tablets, phones), set for example **25 saves**, **3 writers** and **4 KB**.
+2. Tick **Start at the next whole minute** and press **Run** on each. They start together.
+3. Press **Refresh** under **All devices' runs**. Runs that started in the same minute are marked "N together".
+
+Look at:
+
+- **Typical** and **Slow** (1 in 10): how long a save takes when everyone is saving.
+- **Busy**: how often Dropbox asked the device to wait. It's waited out, nothing is lost, but lots of it means split the devices over another account.
+
+Run it once with all devices on the same Dropbox account, and once split over two accounts if you have them. Results are kept in `/_utzline-selftest/load/results`.
 
 ## Tests
 

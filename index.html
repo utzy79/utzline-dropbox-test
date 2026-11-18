@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>UTZLINE Dropbox Test</title>
 <meta name="theme-color" content="#14131c">
-<link rel="manifest" href="manifest.json?v=v8">
-<link rel="icon" href="icons/icon-192.png?v=v8">
+<link rel="manifest" href="manifest.json?v=v9">
+<link rel="icon" href="icons/icon-192.png?v=v9">
 <!--
   UTZLINE Dropbox Test (2026-11-18) -- a standalone trial app, NOT one of the 18 apps and not in their build / installers.
   Andrew: "Build a standalone test app that proves Dropbox can replace SharePoint as the UTZLINE cloud store, with local-first saving.
@@ -42,7 +42,9 @@ section h2{ margin:0 0 8px; font-size:16px; }
 button{ font:inherit; border-radius:8px; border:1px solid var(--line); background:var(--chip); color:var(--ink); padding:7px 13px; cursor:pointer; }
 button.go{ background:var(--accent); border-color:var(--accent); color:var(--accent-ink); font-weight:600; }
 button:disabled{ opacity:.5; cursor:default; }
-input[type=text], textarea{ font:inherit; width:100%; border:1px solid var(--line); border-radius:8px; padding:8px 10px; background:var(--bg); color:var(--ink); }
+.ldgrid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:8px; margin-top:8px; }
+.ldgrid label{ display:flex; flex-direction:column; gap:3px; font-size:13px; color:var(--muted); }
+input[type=text], input[type=number], textarea{ font:inherit; width:100%; border:1px solid var(--line); border-radius:8px; padding:8px 10px; background:var(--bg); color:var(--ink); }
 textarea{ min-height:140px; resize:vertical; }
 .muted{ color:var(--muted); font-size:13px; }
 .mono-safe{ white-space:pre-wrap; word-break:break-all; font-size:12px; line-height:1.4; background:var(--chip); border-radius:6px; padding:6px 8px; margin-top:4px; }
@@ -72,7 +74,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
 </head>
 <body>
 <header>
-  <h1>UTZLINE <b>Dropbox</b> Test</h1><span class="tag">RC 1.0 · v8</span>
+  <h1>UTZLINE <b>Dropbox</b> Test</h1><span class="tag">RC 1.0 · v9</span>
   <span class="net" id="net">Online</span>
   <span class="who" id="who">Not signed in</span>
 </header>
@@ -125,6 +127,22 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
     <div id="testOut"></div>
   </section>
 
+  <section id="secLoad" class="hidden">
+    <h2>6 · Load test (a busy day)</h2>
+    <p class="muted">Many small saves at once, like a busy day on the apps. Each <b>writer</b> stands in for one device saving records one after another, so 3 writers on this device is like 3 tablets. For the real test, run it on several devices at the same moment: tick <b>Start at the next whole minute</b> on each and press Run on all of them. Writes into <b>/_utzline-selftest/load</b> (the same few files are reused; nothing is deleted). Every run's result is saved there too, so <b>All devices' runs</b> compares them.</p>
+    <div class="ldgrid">
+      <label>Saves per writer <input type="number" id="ldN" value="25" min="1" max="500"></label>
+      <label>Writers on this device <input type="number" id="ldW" value="3" min="1" max="20"></label>
+      <label>Each save (KB) <input type="number" id="ldKb" value="4" min="1" max="2048"></label>
+    </div>
+    <div class="row" style="margin-top:6px"><label><input type="checkbox" id="ldWatch" checked> Also check for changes every 5 s (as the apps do)</label></div>
+    <div class="row"><label><input type="checkbox" id="ldSync"> Start at the next whole minute (to start several devices together)</label></div>
+    <div class="row" style="margin-top:8px"><button class="go" id="btnLoad" type="button">Run load test</button><span class="muted" id="loadNote"></span></div>
+    <div id="loadOut"></div>
+    <div class="row" style="margin-top:12px"><b>All devices' runs</b><button type="button" id="btnLoadAll">Refresh</button></div>
+    <div id="loadAll" class="muted">Press Refresh.</div>
+  </section>
+
   <section id="secSpeed">
     <div id="speed" class="speed"></div>
   </section>
@@ -132,7 +150,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
 <script>
 (function(){
   "use strict";
-  var APP_VERSION = "v8";
+  var APP_VERSION = "v9";
   // ---------------------------------------------------------------------------------------------------------------------------------
   // settings (window.DropboxTestConfig: the tests point these at a stand-in Dropbox; never set in real use)
   var DEF = {
@@ -864,6 +882,102 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
   }
 
   // ---------------------------------------------------------------------------------------------------------------------------------
+  // LOAD TEST (2026-11-18, Andrew: "will dropbox cope with thiese apps" -> "do it"). Writers save small records as fast as they can, side by
+  // side (each writer = one device; across devices the same), into the shared folder. Each save is timed from its first try to Dropbox having
+  // it; "busy" answers (429 / too_many_write_operations -- Dropbox serialises writes into one shared folder) are waited out as asked and
+  // counted. The result goes into /_utzline-selftest/load/results so every device's runs can be compared in one table.
+  var DEVICE = (function(){
+    var d = lsGet("device"); if (d) return d;
+    var ua = navigator.userAgent || "", k = /Android/.test(ua) ? (/Mobile/.test(ua) ? "Android phone" : "Android tablet") : /iPhone|iPad/.test(ua) ? "iPhone/iPad" : /Electron/.test(ua) ? "PC app" : /Windows/.test(ua) ? "Windows" : /Mac/.test(ua) ? "Mac" : "device";
+    d = k + " " + Math.random().toString(36).slice(2, 6); lsSet("device", d); return d;
+  })();
+  var LOAD_WAITS = [500, 1000, 2000, 4000, 8000, 15000, 30000];
+  function pct(a, p){ if (!a.length) return 0; var s = a.slice().sort(function(x, y){ return x - y; }); return s[Math.min(s.length - 1, Math.floor(p * (s.length - 1) + 0.5))]; }
+  function loadTest(){
+    if (!AUTH || !ROOT) return Promise.resolve(null);
+    var N = Math.max(1, Math.min(500, parseInt($("ldN").value, 10) || 25)), W = Math.max(1, Math.min(20, parseInt($("ldW").value, 10) || 3));
+    var KB = Math.max(1, Math.min(2048, parseInt($("ldKb").value, 10) || 4)), watch = $("ldWatch").checked, sync = $("ldSync").checked;
+    var dir = "/_utzline-selftest/load/" + DEVICE.replace(/[^\w -]/g, "");
+    var R = { device: DEVICE, who: who(), writers: W, perWriter: N, kb: KB, watch: watch, lat: [], busy: 0, retries: 0, errors: [], checks: 0, checkLat: [], seen: 0 };
+    var pad = new Array(KB * 1024).join("x");
+    $("btnLoad").disabled = true; $("loadOut").innerHTML = "";
+    var startIn = sync ? 60000 - (now() % 60000) : 0;
+    function tick(){ var left = Math.ceil((R.startAt - now()) / 1000); $("loadNote").textContent = left > 0 ? "Starting in " + left + " s…" : "Running… " + R.lat.length + " of " + (N * W) + " saves" + (R.busy ? " · Dropbox said busy " + R.busy + "×" : ""); }
+    R.startAt = now() + startIn;
+    var tk = setInterval(tick, 500); tick();
+    function save(w, i){
+      var rel = dir + "/w" + w + "-" + (i % 10) + ".json", body = JSON.stringify({ device: DEVICE, writer: w, n: i, at: new Date().toISOString(), pad: pad.slice(0, Math.max(0, KB * 1024 - 120)) });
+      var t0 = now(), tries = 0;
+      function go(){
+        tries++;
+        return call("upload", "/files/upload", { path: P(rel), mode: { ".tag": "overwrite" }, autorename: false, mute: true }, new Blob([body]), { what: "load test: saving w" + w + "-" + (i % 10) + ".json" }).then(function(){
+          R.lat.push(now() - t0);
+        }, function(e){
+          var busy = e && (e.status === 429 || /too_many/.test(e.tag || ""));
+          if (busy) R.busy++;
+          if ((busy || (e && (e.status === 0 || e.status >= 500))) && tries <= LOAD_WAITS.length){ R.retries++; return wait(e.retryAfter ? e.retryAfter * 1000 : LOAD_WAITS[tries - 1]).then(go); }
+          R.errors.push({ status: e && e.status, summary: (e && e.message) || String(e), reqId: (e && e.reqId) || "", body: String((e && e.body) || "").slice(0, 300) });
+        });
+      }
+      return go();
+    }
+    function writer(w){ var i = 0; function next(){ if (i >= N) return Promise.resolve(); return save(w, i++).then(next); } return next(); }
+    var done = false;
+    function watcher(){
+      if (!watch) return Promise.resolve();
+      return call("rpc", "/files/list_folder/get_latest_cursor", { path: P("/_utzline-selftest/load"), recursive: true }, null, { what: "load test: starting the change check" }).then(function(c){
+        var cur = c.cursor;
+        function loop(){
+          if (done) return Promise.resolve();
+          return wait(5000).then(function(){
+            if (done) return;
+            var t0 = now();
+            return call("rpc", "/files/list_folder/continue", { cursor: cur }, null, { what: "load test: checking for changes" }).then(function(r){ R.checks++; R.checkLat.push(now() - t0); R.seen += (r.entries || []).length; cur = r.cursor; }, function(e){ if (e && (e.status === 429 || /too_many/.test(e.tag || ""))) R.busy++; }).then(loop);
+          });
+        }
+        return loop();
+      }, function(){});
+    }
+    return wait(startIn).then(function(){
+      R.started = new Date().toISOString(); var t0 = now(), ws = [];
+      for (var w = 1; w <= W; w++) ws.push(writer(w));
+      var wp = watcher();
+      return Promise.all(ws).then(function(){
+        done = true; R.ms = now() - t0; clearInterval(tk);
+        var ok = R.lat.length;
+        R.summary = { ok: ok, of: N * W, p50: pct(R.lat, 0.5), p90: pct(R.lat, 0.9), max: R.lat.length ? Math.max.apply(null, R.lat) : 0, perMin: R.ms ? Math.round(ok * 60000 / R.ms) : 0, checkP50: pct(R.checkLat, 0.5) };
+        delete R.lat; delete R.checkLat;
+        var stamp = R.started.replace(/[:T]/g, "-").slice(0, 19);
+        return call("upload", "/files/upload", { path: P("/_utzline-selftest/load/results/" + stamp + " " + DEVICE.replace(/[^\w -]/g, "") + ".json"), mode: { ".tag": "add" }, autorename: true, mute: true }, new Blob([JSON.stringify(R)]), { what: "load test: saving the result" }).then(null, function(){}).then(function(){ return wp; });
+      }).then(function(){
+        var x = R.summary, good = x.ok === x.of && !R.errors.length;
+        $("loadNote").innerHTML = "<span class='" + (good ? "pass'>Done" : "fail'>Done with problems") + "</span> · " + x.ok + " of " + x.of + " saves in " + secs(R.ms);
+        $("loadOut").innerHTML = "<table><tr><th>Saves</th><th>Typical save</th><th>Slow (1 in 10)</th><th>Worst</th><th>Saves a minute</th><th>Dropbox busy</th></tr><tr><td>" + x.ok + " / " + x.of + "</td><td>" + secs(x.p50) + "</td><td>" + secs(x.p90) + "</td><td>" + secs(x.max) + "</td><td>" + x.perMin + "</td><td>" + R.busy + "× (waited, tried again)</td></tr></table>" +
+          (watch ? "<div class='muted' style='margin-top:4px'>Change checks: " + R.checks + ", typical " + secs(x.checkP50) + ", " + R.seen + " changes seen (other devices' saves included).</div>" : "") +
+          (R.errors.length ? R.errors.slice(0, 3).map(function(e){ return "<div class='err'><b>" + esc(e.summary) + "</b><div class='muted'>HTTP " + esc(e.status) + " · X-Dropbox-Request-Id: " + esc(e.reqId || "—") + "</div><div class='mono-safe'>" + esc(e.body) + "</div></div>"; }).join("") : "");
+        $("btnLoad").disabled = false; paintSpeed(); window.__dbxLastLoad = R;
+        return loadAll().then(function(){ return R; });
+      });
+    }, function(e){ clearInterval(tk); $("btnLoad").disabled = false; $("loadNote").textContent = (e && e.message) || String(e); return null; });
+  }
+  function loadAll(){
+    if (!AUTH || !ROOT) return Promise.resolve();
+    $("loadAll").textContent = "Reading…";
+    return listAll("/_utzline-selftest/load/results").then(function(r){
+      var fs = (r.entries || []).filter(function(e){ return e[".tag"] === "file"; }).sort(function(a, b){ return a.name < b.name ? 1 : -1; }).slice(0, 30);
+      return Promise.all(fs.map(function(f){ return download("/_utzline-selftest/load/results/" + f.name).then(function(x){ return x.blob.text(); }).then(function(t){ try{ return JSON.parse(t); }catch(e){ return null; } }, function(){ return null; }); }));
+    }).then(function(rs){
+      rs = rs.filter(function(x){ return x && x.summary; });
+      if (!rs.length){ $("loadAll").textContent = "No runs yet."; return; }
+      var minute = function(x){ return String(x.started || "").slice(0, 16); };
+      $("loadAll").innerHTML = "<table><tr><th>Started</th><th>Device</th><th>Writers × saves</th><th>OK</th><th>Typical</th><th>Slow</th><th>Worst</th><th>/min</th><th>Busy</th></tr>" + rs.map(function(x){
+        var y = x.summary, together = rs.filter(function(z){ return minute(z) === minute(x); }).length;
+        return "<tr><td>" + esc(new Date(x.started).toLocaleString()) + (together > 1 ? " <span class='chip'>" + together + " together</span>" : "") + "</td><td>" + esc(x.device) + (x.who ? "<div class='muted'>" + esc(x.who) + "</div>" : "") + "</td><td>" + x.writers + " × " + x.perWriter + "</td><td class='" + (y.ok === y.of && !(x.errors || []).length ? "pass" : "fail") + "'>" + y.ok + "/" + y.of + "</td><td>" + secs(y.p50) + "</td><td>" + secs(y.p90) + "</td><td>" + secs(y.max) + "</td><td>" + y.perMin + "</td><td>" + x.busy + "</td></tr>";
+      }).join("") + "</table><div class='muted' style='margin-top:4px'>Runs started in the same minute ran together. Busy = Dropbox asked to wait (it was waited out). Saves a minute is for that device.</div>";
+    }, function(e){ $("loadAll").textContent = /not_found/.test((e && e.tag) || "") ? "No runs yet." : "Couldn't read the results: " + ((e && e.message) || e); });
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------
   // screen
   function paintNet(){ var off = OFFLINE || !navigator.onLine; $("net").textContent = off ? "Offline — working from this device" : "Online"; $("net").className = "net" + (off ? " off" : ""); }
   function showSignInErr(e){ $("signInErr").innerHTML = errHtml(e); }
@@ -874,7 +988,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
     $("who").textContent = signed ? ((ACCOUNT && ACCOUNT.name) || "Signed in") + (ACCOUNT && ACCOUNT.email ? " (" + ACCOUNT.email + ")" : "") + (ROOT ? " · " + ROOT.name : "") : "Not signed in";
     $("secFolder").classList.toggle("hidden", !signed);
     $("folderNow").innerHTML = ROOT ? "Using <b>" + esc(ROOT.name) + "</b> " + (ROOT.ns ? "<span class='muted'>(shared folder " + esc(ROOT.ns) + ", reached the same way by every member)</span>" : "<span class='muted'>(" + esc(ROOT.path) + " in your own Dropbox -- share it to let others in)</span>") : "Not chosen yet.";
-    ["secFiles", "secEdit", "secTest"].forEach(function(id){ $(id).classList.toggle("hidden", !(signed && ROOT)); });
+    ["secFiles", "secEdit", "secTest", "secLoad"].forEach(function(id){ $(id).classList.toggle("hidden", !(signed && ROOT)); });
     paintNet();
   }
   $("btnSignIn").onclick = function(){ $("signInErr").innerHTML = ""; signIn().then(null, function(e){ showSignInErr(errRec(e)); }); };
@@ -890,6 +1004,9 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
   $("edPath").addEventListener("change", loadNote);
   $("edText").addEventListener("input", function(){ edDirty = true; });
   $("btnTest").onclick = function(){ selfTest(); };
+  $("btnLoad").onclick = function(){ loadTest(); };
+  $("btnLoadAll").onclick = function(){ loadAll(); };
+
   // drop box (drag and drop only; on a touch-only tablet a long press opens the picker -- nothing can be dragged there)
   (function(){
     var d = $("drop"), pressT = 0;
@@ -906,7 +1023,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
   })();
 
   // test hooks (the stand-in Dropbox tests drive the page through these)
-  window.__dbxTest = { saveLocal: saveLocal, kick: kick, selfTest: selfTest, queue: function(){ return idbAll("queue"); }, files: function(k){ return idbGet("files", keyOf(k)); }, root: function(){ return ROOT; }, auth: function(){ return AUTH; }, loadFolder: loadFolder, findFolders: findFolders, watch: function(){ return { mode: WATCH.mode, last: LAST_CHANGE }; }, speed: function(){ return SPEED.slice(); }, qlog: function(){ return QLOG.slice(); }, version: APP_VERSION };
+  window.__dbxTest = { loadTest: loadTest, loadAll: loadAll, saveLocal: saveLocal, kick: kick, selfTest: selfTest, queue: function(){ return idbAll("queue"); }, files: function(k){ return idbGet("files", keyOf(k)); }, root: function(){ return ROOT; }, auth: function(){ return AUTH; }, loadFolder: loadFolder, findFolders: findFolders, watch: function(){ return { mode: WATCH.mode, last: LAST_CHANGE }; }, speed: function(){ return SPEED.slice(); }, qlog: function(){ return QLOG.slice(); }, version: APP_VERSION };
 
   // ---------------------------------------------------------------------------------------------------------------------------------
   // start: finish a sign-in Dropbox sent back here; saves that were mid-send when the app closed are sent again
