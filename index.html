@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>UTZLINE Dropbox Test</title>
 <meta name="theme-color" content="#14131c">
-<link rel="manifest" href="manifest.json?v=v7">
-<link rel="icon" href="icons/icon-192.png?v=v7">
+<link rel="manifest" href="manifest.json?v=v8">
+<link rel="icon" href="icons/icon-192.png?v=v8">
 <!--
   UTZLINE Dropbox Test (2026-11-18) -- a standalone trial app, NOT one of the 18 apps and not in their build / installers.
   Andrew: "Build a standalone test app that proves Dropbox can replace SharePoint as the UTZLINE cloud store, with local-first saving.
@@ -72,7 +72,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
 </head>
 <body>
 <header>
-  <h1>UTZLINE <b>Dropbox</b> Test</h1><span class="tag">RC 1.0 · v7</span>
+  <h1>UTZLINE <b>Dropbox</b> Test</h1><span class="tag">RC 1.0 · v8</span>
   <span class="net" id="net">Online</span>
   <span class="who" id="who">Not signed in</span>
 </header>
@@ -132,7 +132,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
 <script>
 (function(){
   "use strict";
-  var APP_VERSION = "v7";
+  var APP_VERSION = "v8";
   // ---------------------------------------------------------------------------------------------------------------------------------
   // settings (window.DropboxTestConfig: the tests point these at a stand-in Dropbox; never set in real use)
   var DEF = {
@@ -560,8 +560,10 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
         });
       } else if (how === "overwrite"){ e.overwrite = true; }
       e.state = "waiting"; e.nextAt = 0; e.err = null;
+      // the note showing that file now shows the copy (its text went there; another Save goes on top of the copy, not into a new clash)
+      if (how === "copy" && normRel($("edPath").value).toLowerCase() === normRel(e.copyOf).toLowerCase()){ noteGen++; noteMsg = ""; $("edPath").value = e.path; }
       return Promise.all([idbPut("queue", e)].concat(later || []));
-    }).then(function(){ paintQueue(); kick(); });
+    }).then(function(){ paintQueue(); paintEditStatus(); kick(); });
   }
   function saveToDevice(blob, name){
     var a = document.createElement("a"), u = URL.createObjectURL(blob);
