@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>UTZLINE Dropbox Test</title>
 <meta name="theme-color" content="#14131c">
-<link rel="manifest" href="manifest.json?v=v4">
-<link rel="icon" href="icons/icon-192.png?v=v4">
+<link rel="manifest" href="manifest.json?v=v5">
+<link rel="icon" href="icons/icon-192.png?v=v5">
 <!--
   UTZLINE Dropbox Test (2026-11-18) -- a standalone trial app, NOT one of the 18 apps and not in their build / installers.
   Andrew: "Build a standalone test app that proves Dropbox can replace SharePoint as the UTZLINE cloud store, with local-first saving.
@@ -72,7 +72,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
 </head>
 <body>
 <header>
-  <h1>UTZLINE <b>Dropbox</b> Test</h1><span class="tag">RC 1.0 · v4</span>
+  <h1>UTZLINE <b>Dropbox</b> Test</h1><span class="tag">RC 1.0 · v5</span>
   <span class="net" id="net">Online</span>
   <span class="who" id="who">Not signed in</span>
 </header>
@@ -132,7 +132,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
 <script>
 (function(){
   "use strict";
-  var APP_VERSION = "v4";
+  var APP_VERSION = "v5";
   // ---------------------------------------------------------------------------------------------------------------------------------
   // settings (window.DropboxTestConfig: the tests point these at a stand-in Dropbox; never set in real use)
   var DEF = {
@@ -386,7 +386,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
     var prev = ROOT;
     ROOT = { name: x.name, ns: x.ns || null, path: x.ns ? null : (x.path || null) };
     return call("rpc", "/files/list_folder", { path: P(""), limit: 1 }, null, { what: "opening " + x.name }).then(function(){
-      lsSet("root", ROOT); $("folderList").classList.add("hidden"); CUR = ""; paintAll(); startWatch(); loadFolder(""); kick();
+      lsSet("root", ROOT); $("folderList").classList.add("hidden"); CUR = ""; paintAll(); startWatch(); loadFolder(""); kick(); loadNote();
     }, function(e){ ROOT = prev; $("folderErr").innerHTML = errHtml(errRec(e)); });
   }
 
@@ -625,7 +625,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
   function openFile(x){
     var rel = (CUR ? CUR : "") + "/" + x.name;
     fileBlob(rel).then(function(bl){
-      if (TEXTY.test(x.name) && bl.size <= 2 * 1024 * 1024) return bl.text().then(function(t){ $("edPath").value = rel; $("edText").value = t; paintEditStatus(); $("secEdit").scrollIntoView({ behavior: "smooth" }); });
+      if (TEXTY.test(x.name) && bl.size <= 2 * 1024 * 1024) return bl.text().then(function(t){ noteGen++; edDirty = false; noteMsg = ""; $("edPath").value = rel; $("edText").value = t; paintEditStatus(); $("secEdit").scrollIntoView({ behavior: "smooth" }); });
       $("edStatus").textContent = x.name + ": " + bytes(bl.size) + " -- on this device (use Save to this device to keep a copy).";
     }, function(e){ $("filesErr").innerHTML = errHtml(errRec(e)); });
   }
@@ -636,8 +636,40 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
       if (q.some(function(e){ return e.state === "conflict"; })) s = "Saved on this device · CONFLICT -- someone else saved first (see Saves on this device)";
       else if (q.some(function(e){ return e.state === "failed"; })) s = "Saved on this device · Dropbox refused it (see Saves on this device)";
       else if (q.length) s = "Saved on this device · waiting to go up";
-      else if (f && f.rev) s = "In Dropbox · rev " + String(f.rev).slice(0, 9);
+      else if (f && f.rev && !noteMsg) s = "In Dropbox · rev " + String(f.rev).slice(0, 9);
+      else s = noteMsg;
       $("edStatus").textContent = s;
+    });
+  }
+
+  // the note opens its file from Dropbox (Andrew's phone, 2026-11-18: "Test 1" typed into a note.txt the phone had never read went up as a
+  // NEW file and was a conflict). Like opening a file before editing it: the text and the rev come from Dropbox, so Save is made from the
+  // newest version. Text typed before it loads is kept (the status says Save replaces Dropbox's copy); my own waiting save is shown as is.
+  var edDirty = false, noteGen = 0, noteMsg = "";
+  function noteSay(t){ noteMsg = t; $("edStatus").textContent = t; }
+  function loadNote(){
+    if (!AUTH || !ROOT) return;
+    var rel = normRel($("edPath").value), gen = ++noteGen; noteMsg = "";
+    if (!rel || !TEXTY.test(rel)){ paintEditStatus(); return; }
+    var k = keyOf(rel), same = function(){ return gen === noteGen && normRel($("edPath").value) === rel; };
+    $("edStatus").textContent = "Opening " + base(rel) + " from Dropbox...";
+    pendingFor(k).then(function(q){
+      if (q.length) return idbGet("files", k).then(function(f){ if (!same()) return; return (!edDirty && f && f.blob ? f.blob.text().then(function(t){ $("edText").value = t; }) : Promise.resolve()).then(paintEditStatus); });
+      return download(rel).then(function(r){
+        return r.blob.text().then(function(t){
+          if (!same()) return;
+          if (!edDirty || $("edText").value === t){ $("edText").value = t; edDirty = false; paintEditStatus(); }
+          else noteSay(base(rel) + " is in Dropbox (rev " + String(r.meta && r.meta.rev).slice(0, 9) + ") with other text -- Save replaces it with yours.");
+        });
+      }, function(e){
+        if (!same()) return;
+        if (e && e.status === 409 && /not_found/.test(e.tag || "")){ if (!edDirty) $("edText").value = ""; noteSay("New file -- not in Dropbox yet. Save puts it there."); return; }
+        return idbGet("files", k).then(function(f){
+          if (!same()) return;
+          if (f && f.blob && !edDirty) return f.blob.text().then(function(t){ $("edText").value = t; noteSay("Couldn't reach Dropbox -- showing this device's copy (" + ((e && e.message) || "no answer") + ")"); });
+          noteSay("Couldn't open " + base(rel) + " from Dropbox: " + ((e && e.message) || "no answer"));
+        });
+      });
     });
   }
 
@@ -798,10 +830,11 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
   $("btnSendNow").onclick = function(){ idbAll("queue").then(function(q){ return Promise.all(q.filter(function(e){ return e.state === "waiting"; }).map(function(e){ e.nextAt = 0; return idbPut("queue", e); })); }).then(function(){ setOffline(!navigator.onLine); kick(); }); };
   $("btnSave").onclick = function(){
     var rel = normRel($("edPath").value);
-    saveLocal(rel, new Blob([$("edText").value], { type: "text/plain" })).then(function(){ $("edStatus").textContent = "Saved on this device · waiting to go up"; }, function(e){ $("edStatus").textContent = (e && e.message) || String(e); });
+    saveLocal(rel, new Blob([$("edText").value], { type: "text/plain" })).then(function(){ edDirty = false; noteMsg = ""; $("edStatus").textContent = "Saved on this device · waiting to go up"; }, function(e){ $("edStatus").textContent = (e && e.message) || String(e); });
   };
   $("btnSaveDevice").onclick = function(){ saveToDevice(new Blob([$("edText").value], { type: "text/plain" }), base(normRel($("edPath").value)) || "note.txt"); };
-  $("edPath").addEventListener("change", paintEditStatus);
+  $("edPath").addEventListener("change", loadNote);
+  $("edText").addEventListener("input", function(){ edDirty = true; });
   $("btnTest").onclick = function(){ selfTest(); };
   // drop box (drag and drop only; on a touch-only tablet a long press opens the picker -- nothing can be dragged there)
   (function(){
@@ -832,7 +865,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
     }).then(function(){
       paintAll(); paintQueue();
       if (AUTH && AUTH.access && !ACCOUNT) loadAccount().then(null, function(){});
-      if (AUTH && ROOT){ loadFolder(""); startWatch(); kick(); }
+      if (AUTH && ROOT){ loadFolder(""); startWatch(); kick(); loadNote(); }
     });
   }
   start();
