@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>UTZLINE Dropbox Test</title>
 <meta name="theme-color" content="#14131c">
-<link rel="manifest" href="manifest.json?v=v2">
-<link rel="icon" href="icons/icon-192.png?v=v2">
+<link rel="manifest" href="manifest.json?v=v3">
+<link rel="icon" href="icons/icon-192.png?v=v3">
 <!--
   UTZLINE Dropbox Test (2026-11-18) -- a standalone trial app, NOT one of the 18 apps and not in their build / installers.
   Andrew: "Build a standalone test app that proves Dropbox can replace SharePoint as the UTZLINE cloud store, with local-first saving.
@@ -69,7 +69,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
 </head>
 <body>
 <header>
-  <h1>UTZLINE <b>Dropbox</b> Test</h1><span class="tag">RC 1.0 · v2</span>
+  <h1>UTZLINE <b>Dropbox</b> Test</h1><span class="tag">RC 1.0 · v3</span>
   <span class="net" id="net">Online</span>
   <span class="who" id="who">Not signed in</span>
 </header>
@@ -129,7 +129,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
 <script>
 (function(){
   "use strict";
-  var APP_VERSION = "v2";
+  var APP_VERSION = "v3";
   // ---------------------------------------------------------------------------------------------------------------------------------
   // settings (window.DropboxTestConfig: the tests point these at a stand-in Dropbox; never set in real use)
   var DEF = {
@@ -749,8 +749,17 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
       });
     }).then(function(){
       return step("queue", "A local-first save goes up (queue)", function(){
-        var rel = dir + "/queued.txt", t0 = now();
-        return saveLocal(rel, new Blob(["queued " + stamp])).then(function(){
+        var rel = dir + "/queued.txt", t0 = now(), k = keyOf(rel);
+        // queued.txt is shared by every device's self-test: a device that hasn't seen it would send it as new (mode add) and rightly get
+        // a conflict. So, like opening a file before editing it: (1) an earlier self-test save of it still held here (conflict / failed)
+        // is the self-test's own file -- it goes up over theirs; (2) the current rev is looked up, so this save is made from it.
+        function settled(n){ return pendingFor(k).then(function(q){ if (!q.length) return; if (n <= 0) throw new Error("An earlier self-test save of queued.txt is still waiting"); return wait(500).then(function(){ return settled(n - 1); }); }); }
+        return pendingFor(k).then(function(q){
+          return Promise.all(q.filter(function(e){ return e.state === "conflict" || e.state === "failed"; }).map(function(e){ return retryEntry(e.k, "overwrite"); }));
+        }).then(function(){ return settled(120); }).then(function(){ return getMeta(rel, "self-test: looking up queued.txt"); }).then(function(m){
+          if (!m) return;
+          return idbGet("files", k).then(function(f){ f = f || { path: rel }; f.rev = m.rev; f.hash = m.content_hash; return idbPut("files", f, k); });
+        }).then(function(){ return saveLocal(rel, new Blob(["queued " + stamp])); }).then(function(){
           function check(n){ return pendingFor(keyOf(rel)).then(function(q){ if (!q.length) return; var bad = q.filter(function(e){ return e.state === "conflict" || e.state === "failed"; })[0]; if (bad) throw new Error("The queued save was " + bad.state + ": " + (bad.err && bad.err.summary)); if (n <= 0) throw new Error("Still waiting after 60 s"); return wait(500).then(function(){ return check(n - 1); }); }); }
           return check(120).then(function(){ return idbGet("files", keyOf(rel)); }).then(function(f){ return "saved on this device, then in Dropbox in " + secs(now() - t0) + " (rev " + String(f && f.rev).slice(0, 9) + ")"; });
         });
