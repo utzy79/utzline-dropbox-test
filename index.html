@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>UTZLINE Dropbox Test</title>
 <meta name="theme-color" content="#14131c">
-<link rel="manifest" href="manifest.json?v=v6">
-<link rel="icon" href="icons/icon-192.png?v=v6">
+<link rel="manifest" href="manifest.json?v=v7">
+<link rel="icon" href="icons/icon-192.png?v=v7">
 <!--
   UTZLINE Dropbox Test (2026-11-18) -- a standalone trial app, NOT one of the 18 apps and not in their build / installers.
   Andrew: "Build a standalone test app that proves Dropbox can replace SharePoint as the UTZLINE cloud store, with local-first saving.
@@ -72,7 +72,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
 </head>
 <body>
 <header>
-  <h1>UTZLINE <b>Dropbox</b> Test</h1><span class="tag">RC 1.0 · v6</span>
+  <h1>UTZLINE <b>Dropbox</b> Test</h1><span class="tag">RC 1.0 · v7</span>
   <span class="net" id="net">Online</span>
   <span class="who" id="who">Not signed in</span>
 </header>
@@ -132,7 +132,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
 <script>
 (function(){
   "use strict";
-  var APP_VERSION = "v6";
+  var APP_VERSION = "v7";
   // ---------------------------------------------------------------------------------------------------------------------------------
   // settings (window.DropboxTestConfig: the tests point these at a stand-in Dropbox; never set in real use)
   var DEF = {
@@ -541,6 +541,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
     e.state = "failed"; return idbPut("queue", e).then(function(){ return true; });
   }
   function retryEntry(k, how){
+    var later = null;
     return idbAll("queue").then(function(q){
       var e = q.filter(function(x){ return x.k === k; })[0]; if (!e) return;
       if (how === "copy"){ // keep both: mine goes up as a copy beside theirs (nothing is lost, nothing overwritten)
@@ -548,10 +549,18 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
         var dot = e.path.lastIndexOf("."), slash = e.path.lastIndexOf("/");
         var stemEnd = dot > slash ? dot : e.path.length;
         e.copyOf = e.path; e.path = e.path.slice(0, stemEnd) + " (conflict " + (who() || "this device") + " " + stamp + ")" + e.path.slice(stemEnd);
+        var oldKey = e.key;
         e.key = keyOf(e.path); e.name = base(e.path); e.baseRev = null; e.chain = false; e.overwrite = false;
+        // this device's later saves of the same file (made on top of this one) follow it into the copy (Andrew's phone, 2026-11-18: a
+        // save made offline behind a held conflict would otherwise clash again once its first save went up as a copy)
+        later = q.filter(function(x){ return x.key === oldKey && x.k > e.k; }).map(function(x){
+          x.copyOf = e.copyOf; x.path = e.path; x.key = e.key; x.name = e.name; x.chain = true; x.baseRev = null; x.overwrite = false;
+          if (x.state === "conflict" || x.state === "failed"){ x.state = "waiting"; x.nextAt = 0; x.err = null; }
+          return idbPut("queue", x);
+        });
       } else if (how === "overwrite"){ e.overwrite = true; }
       e.state = "waiting"; e.nextAt = 0; e.err = null;
-      return idbPut("queue", e);
+      return Promise.all([idbPut("queue", e)].concat(later || []));
     }).then(function(){ paintQueue(); kick(); });
   }
   function saveToDevice(blob, name){
@@ -627,8 +636,13 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
       paintFiles(r.pages);
     }, function(e){
       if (my !== listGen) return;
-      $("filesErr").innerHTML = errHtml(errRec(e));
-      return idbGet("meta", "list:" + keyOf(at)).then(function(l){ if (l && my === listGen){ LISTED = l.entries; paintFiles(0, l.at); } });
+      // no signal with a listing kept on this device: the grey "From this device" line says it (the full error is for anything else)
+      return idbGet("meta", "list:" + keyOf(at)).then(function(l){
+        if (my !== listGen) return;
+        if (l && e.status === 0){ $("filesErr").innerHTML = ""; LISTED = l.entries; paintFiles(0, l.at); return; }
+        $("filesErr").innerHTML = errHtml(errRec(e));
+        if (l){ LISTED = l.entries; paintFiles(0, l.at); }
+      });
     });
   }
   function paintCrumbs(){
