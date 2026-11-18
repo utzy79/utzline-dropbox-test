@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>UTZLINE Dropbox Test</title>
 <meta name="theme-color" content="#14131c">
-<link rel="manifest" href="manifest.json?v=v5">
-<link rel="icon" href="icons/icon-192.png?v=v5">
+<link rel="manifest" href="manifest.json?v=v6">
+<link rel="icon" href="icons/icon-192.png?v=v6">
 <!--
   UTZLINE Dropbox Test (2026-11-18) -- a standalone trial app, NOT one of the 18 apps and not in their build / installers.
   Andrew: "Build a standalone test app that proves Dropbox can replace SharePoint as the UTZLINE cloud store, with local-first saving.
@@ -72,7 +72,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
 </head>
 <body>
 <header>
-  <h1>UTZLINE <b>Dropbox</b> Test</h1><span class="tag">RC 1.0 · v5</span>
+  <h1>UTZLINE <b>Dropbox</b> Test</h1><span class="tag">RC 1.0 · v6</span>
   <span class="net" id="net">Online</span>
   <span class="who" id="who">Not signed in</span>
 </header>
@@ -132,7 +132,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
 <script>
 (function(){
   "use strict";
-  var APP_VERSION = "v5";
+  var APP_VERSION = "v6";
   // ---------------------------------------------------------------------------------------------------------------------------------
   // settings (window.DropboxTestConfig: the tests point these at a stand-in Dropbox; never set in real use)
   var DEF = {
@@ -339,7 +339,10 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
       if (ROOT && ROOT.ns && !opt.noRoot) h["Dropbox-API-Path-Root"] = JSON.stringify({ ".tag": "namespace_id", namespace_id: String(ROOT.ns) });
       if (kind === "rpc"){ if (arg !== null && arg !== undefined){ h["Content-Type"] = "application/json"; init.body = JSON.stringify(arg); } }
       else { h["Dropbox-API-Arg"] = asciiJson(arg); if (kind === "upload"){ h["Content-Type"] = "application/octet-stream"; init.body = body || new Blob([]); } }
-      return fetch((kind === "rpc" ? CFG.api : CFG.content) + path, init).then(null, function(x){ note(what, t0, "offline", opt.bg); throw netErr(x, what); });
+      // opt.timeoutMs: a request that hangs (a phone losing signal mid-upload held one for 133 s) is given up and counted as no connection
+      var ac = opt.timeoutMs && window.AbortController ? new AbortController() : null, tm = 0;
+      if (ac){ init.signal = ac.signal; tm = setTimeout(function(){ ac.abort(); }, opt.timeoutMs); }
+      return fetch((kind === "rpc" ? CFG.api : CFG.content) + path, init).then(function(r){ clearTimeout(tm); return r; }, function(x){ clearTimeout(tm); note(what, t0, "offline", opt.bg); var e = netErr(x, what); if (ac && ac.signal.aborted) e.body = "no answer in " + Math.round(opt.timeoutMs / 1000) + " s -- given up"; throw e; });
     }).then(function(r){
       if (r.ok){
         note(what, t0, r.status, opt.bg);
@@ -420,18 +423,53 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
     if (!forceSession && blob.size <= CFG.simpleMax) return call("upload", "/files/upload", arg, blob, { what: what });
     return uploadSession(arg, blob, what);
   }
+  // An upload session on a weak signal (Andrew's phone, 2026-11-18: part 1 of 20 MB hung 133 s, then "Failed to fetch"): each part has a
+  // time limit and is tried again (2, 5, 15, 30 s; waiting for the signal) -- a dropped part is sent again, not the whole file. If Dropbox
+  // did get a part whose answer was lost, it says so (incorrect_offset + correct_offset) and the upload carries on from there. A finish
+  // whose answer was lost is checked by looking the file up (the caller still checks content_hash).
+  var PART_WAITS = [2000, 5000, 15000, 30000];
+  function partTimeout(n){ return Math.max(45000, Math.round(n / (64 * 1024)) * 1000); } // at least 64 KB/s, never under 45 s
+  function retryable(e){ return e && (e.status === 0 || e.status === 429 || e.status >= 500 || /too_many/.test(e.tag || "")); }
+  function untilOnline(){ return navigator.onLine ? Promise.resolve() : new Promise(function(res){ var n = 0, t = setInterval(function(){ if (navigator.onLine || ++n >= 60){ clearInterval(t); res(); } }, 1000); }); } // at most a minute: then the queue takes over
+  function correctOffset(e){ try { var j = JSON.parse(e.body || "{}").error || {}; if (j.lookup_failed) j = j.lookup_failed; return j[".tag"] === "incorrect_offset" && typeof j.correct_offset === "number" ? j.correct_offset : null; } catch (x){ return null; } }
+  function withRetry(fn, onErr){
+    var n = 0;
+    function go(){ return fn(n).then(null, function(e){
+      var r = onErr ? onErr(e, n) : null; if (r) return r;
+      if (!retryable(e) || n >= PART_WAITS.length) throw e;
+      var w = e.retryAfter ? e.retryAfter * 1000 : PART_WAITS[n]; n++;
+      return wait(w).then(untilOnline).then(go);
+    }); }
+    return go();
+  }
   function uploadSession(commit, blob, what){
-    var C = CFG.chunk, off = Math.min(C, blob.size), parts = 1;
-    return call("upload", "/files/upload_session/start", { close: false }, blob.slice(0, off), { what: what + " (part 1)" }).then(function(s){
-      var sid = s.session_id;
-      function next(){
-        if (blob.size - off <= C){ parts++; return call("upload", "/files/upload_session/finish", { cursor: { session_id: sid, offset: off }, commit: commit }, blob.slice(off), { what: what + " (last part)" }).then(function(m){ if (m) m.__parts = parts; return m; }); }
-        var end = off + C; parts++;
-        return call("upload", "/files/upload_session/append_v2", { cursor: { session_id: sid, offset: off }, close: false }, blob.slice(off, end), { what: what + " (part " + parts + ")" }).then(function(){ off = end; return next(); });
+    var C = CFG.chunk, off = 0, parts = 0, sid = null, lostFinish = false;
+    return withRetry(function(n){
+      var end = Math.min(C, blob.size);
+      return call("upload", "/files/upload_session/start", { close: false }, blob.slice(0, end), { what: what + " (part 1)" + (n ? " again" : ""), timeoutMs: partTimeout(end) }).then(function(s){ sid = s.session_id; off = end; parts = 1; });
+    }).then(function next(){
+      if (blob.size - off <= C){
+        return withRetry(function(n){
+          return call("upload", "/files/upload_session/finish", { cursor: { session_id: sid, offset: off }, commit: commit }, blob.slice(off), { what: what + " (last part)" + (n ? " again" : ""), timeoutMs: partTimeout(blob.size - off) })
+            .then(null, function(e){ if (e.status === 0) lostFinish = true; throw e; });
+        }, function(e){
+          var co = correctOffset(e);
+          if (co !== null && co !== off){ off = co; return next(); }
+          if (lostFinish && e.status === 409 && /lookup_failed\/(not_found|closed)/.test(e.tag || "")) return call("rpc", "/files/get_metadata", { path: commit.path }, null, { what: what + " (checking the last part arrived)" });
+          return null;
+        }).then(function(m){ if (m && typeof m === "object" && !m.__parts) m.__parts = parts + 1; return m; });
       }
-      return next();
+      var end = off + C;
+      return withRetry(function(n){
+        return call("upload", "/files/upload_session/append_v2", { cursor: { session_id: sid, offset: off }, close: false }, blob.slice(off, end), { what: what + " (part " + (parts + 1) + ")" + (n ? " again" : ""), timeoutMs: partTimeout(end - off) });
+      }, function(e){
+        var co = correctOffset(e);
+        if (co !== null){ return Promise.resolve("moved:" + co); } // Dropbox already has up to co: carry on from there
+        return null;
+      }).then(function(r){ if (typeof r === "string" && r.indexOf("moved:") === 0) off = +r.slice(6); else off = end; parts++; return next(); });
     });
   }
+
 
   // ---------------------------------------------------------------------------------------------------------------------------------
   // LOCAL-FIRST SAVING. Every save goes into this device first ("saved on this device"); the uploader sends it in order. A save is only
