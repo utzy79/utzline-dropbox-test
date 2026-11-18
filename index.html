@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>UTZLINE Dropbox Test</title>
 <meta name="theme-color" content="#14131c">
-<link rel="manifest" href="manifest.json?v=v3">
-<link rel="icon" href="icons/icon-192.png?v=v3">
+<link rel="manifest" href="manifest.json?v=v4">
+<link rel="icon" href="icons/icon-192.png?v=v4">
 <!--
   UTZLINE Dropbox Test (2026-11-18) -- a standalone trial app, NOT one of the 18 apps and not in their build / installers.
   Andrew: "Build a standalone test app that proves Dropbox can replace SharePoint as the UTZLINE cloud store, with local-first saving.
@@ -55,21 +55,24 @@ textarea{ min-height:140px; resize:vertical; }
 .chip.ok{ color:var(--ok); } .chip.warn{ color:var(--warn); } .chip.bad{ color:var(--bad); }
 .drop{ border:2px dashed var(--line); border-radius:10px; padding:18px; text-align:center; color:var(--muted); margin-top:8px; user-select:none; -webkit-user-select:none; }
 .drop.over{ border-color:var(--accent); color:var(--ink); }
-table{ border-collapse:collapse; width:100%; font-size:13px; }
+table{ border-collapse:collapse; width:100%; font-size:13px; table-layout:fixed; }
+td, th{ overflow-wrap:anywhere; }
 td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
 .pass{ color:var(--ok); font-weight:700; } .fail{ color:var(--bad); font-weight:700; }
 .crumbs a{ color:var(--accent); cursor:pointer; text-decoration:none; }
 .hidden{ display:none !important; }
 .status{ font-size:14px; margin:4px 0 8px; }
-.speed .t{ color:var(--muted); min-width:64px; display:inline-block; }
-.speed .s{ float:right; }
+.speed .row{ display:flex; flex-wrap:nowrap; gap:8px; align-items:baseline; padding:1px 0; }
+.speed .t{ color:var(--muted); flex:0 0 auto; min-width:64px; }
+.speed .w{ flex:1 1 auto; min-width:0; }
+.speed .s{ flex:0 0 auto; margin-left:auto; }
 .slow{ color:var(--warn); font-weight:600; } .fast{ color:var(--ok); font-weight:600; }
 @media (max-width:640px){ header .who{ margin-left:0; width:100%; } }
 </style>
 </head>
 <body>
 <header>
-  <h1>UTZLINE <b>Dropbox</b> Test</h1><span class="tag">RC 1.0 · v3</span>
+  <h1>UTZLINE <b>Dropbox</b> Test</h1><span class="tag">RC 1.0 · v4</span>
   <span class="net" id="net">Online</span>
   <span class="who" id="who">Not signed in</span>
 </header>
@@ -129,7 +132,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
 <script>
 (function(){
   "use strict";
-  var APP_VERSION = "v3";
+  var APP_VERSION = "v4";
   // ---------------------------------------------------------------------------------------------------------------------------------
   // settings (window.DropboxTestConfig: the tests point these at a stand-in Dropbox; never set in real use)
   var DEF = {
@@ -218,7 +221,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
     var waits = sp.filter(function(x){ return /longpoll/.test(x.what); });
     var slow = sp.filter(function(x){ return !/longpoll/.test(x.what); }).sort(function(a, b){ return b.ms - a.ms; }).slice(0, 8);
     h += "<div class='muted' style='margin-bottom:6px'>" + fg.length + " request" + (fg.length === 1 ? "" : "s") + " for what you did" + (ms.length ? " (half took under " + secs(med) + ")" : "") + ", " + (sp.length - fg.length) + " in the background</div>";
-    h += slow.map(function(x){ return "<div><span class='t'>" + hhmmss(x.at) + "</span> " + esc(x.what) + (x.bg ? " (background)" : "") + (x.status && x.status !== 200 ? " — " + esc(x.status) : "") + "<span class='s " + (x.ms >= 1000 ? "slow" : "fast") + "'>" + secs(x.ms) + "</span></div>"; }).join("");
+    h += slow.map(function(x){ return "<div class='row'><span class='t'>" + hhmmss(x.at) + "</span><span class='w'>" + esc(x.what) + (x.bg ? " (background)" : "") + (x.status && x.status !== 200 ? " — " + esc(x.status) : "") + "</span><span class='s " + (x.ms >= 1000 ? "slow" : "fast") + "'>" + secs(x.ms) + "</span></div>"; }).join("");
     if (waits.length) h += "<div class='muted' style='margin-top:6px'>Not counted: " + waits.length + " wait" + (waits.length === 1 ? "" : "s") + " for changes (longpoll -- Dropbox holds each one open until something changes, up to about 30 s).</div>";
     $("speed").innerHTML = h;
   }
@@ -678,7 +681,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
     var out = [], dir = SELFTEST_DIR, t0all = now(), stamp = new Date().toISOString();
     $("btnTest").disabled = true; $("testNote").textContent = "Running…";
     function paint(){
-      $("testOut").innerHTML = "<table><tr><th>Step</th><th>Result</th><th>Time</th><th>Details</th></tr>" + out.map(function(s){ return "<tr data-step='" + esc(s.id) + "'><td>" + esc(s.name) + "</td><td class='" + (s.ok ? "pass'>PASS" : "fail'>FAIL") + "</td><td>" + secs(s.ms) + "</td><td>" + esc(s.detail || "") + (s.err ? errHtml(errRec(s.err)) : "") + "</td></tr>"; }).join("") + "</table>";
+      $("testOut").innerHTML = "<table><tr><th style='width:30%'>Step</th><th style='width:58px'>Result</th><th style='width:46px'>Time</th><th>Details</th></tr>" + out.map(function(s){ return "<tr data-step='" + esc(s.id) + "'><td>" + esc(s.name) + "</td><td class='" + (s.ok ? "pass'>PASS" : "fail'>FAIL") + "</td><td>" + secs(s.ms) + "</td><td>" + esc(s.detail || "") + (s.err ? errHtml(errRec(s.err)) : "") + "</td></tr>"; }).join("") + "</table>";
     }
     function step(id, name, fn){
       var t0 = now();

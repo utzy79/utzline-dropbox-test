@@ -1,6 +1,6 @@
 # UTZLINE Dropbox Test
 
-Current version: v3 (RC 1.0)
+Current version: v4 (RC 1.0)
 
 A separate test app. It proves Dropbox can replace SharePoint as the UTZLINE cloud store.
 It does not touch the 18 apps or any SharePoint code. It is not in `native-trial/apps.json`, `build_apps.py` or the installers: a PWA zip is enough.
