@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>UTZLINE Dropbox Test</title>
 <meta name="theme-color" content="#14131c">
-<link rel="manifest" href="manifest.json?v=v9">
-<link rel="icon" href="icons/icon-192.png?v=v9">
+<link rel="manifest" href="manifest.json?v=v10">
+<link rel="icon" href="icons/icon-192.png?v=v10">
 <!--
   UTZLINE Dropbox Test (2026-11-18) -- a standalone trial app, NOT one of the 18 apps and not in their build / installers.
   Andrew: "Build a standalone test app that proves Dropbox can replace SharePoint as the UTZLINE cloud store, with local-first saving.
@@ -74,7 +74,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
 </head>
 <body>
 <header>
-  <h1>UTZLINE <b>Dropbox</b> Test</h1><span class="tag">RC 1.0 · v9</span>
+  <h1>UTZLINE <b>Dropbox</b> Test</h1><span class="tag">RC 1.0 · v10</span>
   <span class="net" id="net">Online</span>
   <span class="who" id="who">Not signed in</span>
 </header>
@@ -85,6 +85,18 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
     <p class="muted">Each person signs in with their own Dropbox account (invited to the shared UTZLINE folder). Nothing else needs installing.</p>
     <p class="muted">This page sends Dropbox back to <b id="redir"></b> — that exact address must be listed under <b>Redirect URIs</b> in the Dropbox App Console.</p>
     <div id="signInErr"></div>
+  </section>
+
+  <section id="secGitKey" class="hidden">
+    <h2>Key for GitHub (app updates)</h2>
+    <p class="muted">For the UTZLINE apps' <b>Update available</b>: GitHub puts each new build of the Android Dropbox apps into Dropbox, in <b>UTZLINE Apps</b> beside UTZLINE. It needs these two values as GitHub secrets (repository <b>Settings → Secrets and variables → Actions → New repository secret</b>). Sign in with an account that can edit the team folder, and choose the <b>team folder UTZLINE is in</b> in step 2 first.</p>
+    <div class="row"><button type="button" id="btnGitKey">Show the key for GitHub</button></div>
+    <div id="gitKey" class="hidden">
+      <div class="mono-safe" style="margin-top:8px"><b>DROPBOX_NS</b> = <span id="gkNs"></span> <button type="button" data-copy="gkNs">Copy</button></div>
+      <div class="mono-safe" style="margin-top:8px"><b>DROPBOX_REFRESH_TOKEN</b> = <span id="gkRt"></span> <button type="button" data-copy="gkRt">Copy</button></div>
+      <p class="err" style="margin-top:8px">The refresh token is a password for this Dropbox account: paste it only into GitHub's secret box. Don't press <b>Sign out</b> on this page afterwards (that would cancel it); use <b>Leave this page without cancelling the key</b>.</p>
+      <div class="row"><button type="button" id="btnGitLeave">Leave this page without cancelling the key</button></div>
+    </div>
   </section>
 
   <section id="secFolder" class="hidden">
@@ -150,7 +162,7 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
 <script>
 (function(){
   "use strict";
-  var APP_VERSION = "v9";
+  var APP_VERSION = "v10";
   // ---------------------------------------------------------------------------------------------------------------------------------
   // settings (window.DropboxTestConfig: the tests point these at a stand-in Dropbox; never set in real use)
   var DEF = {
@@ -988,11 +1000,23 @@ td,th{ text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); ve
     $("who").textContent = signed ? ((ACCOUNT && ACCOUNT.name) || "Signed in") + (ACCOUNT && ACCOUNT.email ? " (" + ACCOUNT.email + ")" : "") + (ROOT ? " · " + ROOT.name : "") : "Not signed in";
     $("secFolder").classList.toggle("hidden", !signed);
     $("folderNow").innerHTML = ROOT ? "Using <b>" + esc(ROOT.name) + "</b> " + (ROOT.ns ? "<span class='muted'>(shared folder " + esc(ROOT.ns) + ", reached the same way by every member)</span>" : "<span class='muted'>(" + esc(ROOT.path) + " in your own Dropbox -- share it to let others in)</span>") : "Not chosen yet.";
+    $("secGitKey").classList.toggle("hidden", !(signed && ROOT && ROOT.ns));
     ["secFiles", "secEdit", "secTest", "secLoad"].forEach(function(id){ $(id).classList.toggle("hidden", !(signed && ROOT)); });
     paintNet();
   }
   $("btnSignIn").onclick = function(){ $("signInErr").innerHTML = ""; signIn().then(null, function(e){ showSignInErr(errRec(e)); }); };
   $("btnSignOut").onclick = signOut;
+  // (2026-11-19) the key GitHub needs to put new app builds into Dropbox (native-trial/tools/publish_dropbox.js)
+  $("btnGitKey").onclick = function(){
+    if (!AUTH || !AUTH.refresh || !ROOT || !ROOT.ns){ alert("Sign in and choose the team folder first."); return; }
+    $("gkNs").textContent = String(ROOT.ns); $("gkRt").textContent = AUTH.refresh; $("gitKey").classList.remove("hidden");
+  };
+  Array.prototype.forEach.call(document.querySelectorAll("[data-copy]"), function(b){ b.onclick = function(){
+    var t = $(b.getAttribute("data-copy")).textContent;
+    (navigator.clipboard && navigator.clipboard.writeText ? navigator.clipboard.writeText(t) : Promise.reject()).then(function(){ b.textContent = "Copied"; setTimeout(function(){ b.textContent = "Copy"; }, 1500); }, function(){ prompt("Copy this:", t); });
+  }; });
+  // forget the sign-in on this page only: nothing is revoked, so GitHub's copy keeps working
+  $("btnGitLeave").onclick = function(){ AUTH = null; ACCOUNT = null; lsSet("auth", null); lsSet("account", null); stopWatch(); $("gitKey").classList.add("hidden"); $("gkRt").textContent = ""; paintAll(); };
   $("btnFindFolders").onclick = function(){ findFolders(); };
   $("btnRefresh").onclick = function(){ loadFolder(CUR); };
   $("btnSendNow").onclick = function(){ idbAll("queue").then(function(q){ return Promise.all(q.filter(function(e){ return e.state === "waiting"; }).map(function(e){ e.nextAt = 0; return idbPut("queue", e); })); }).then(function(){ setOffline(!navigator.onLine); kick(); }); };
